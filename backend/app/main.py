@@ -12,6 +12,22 @@ class IssueCreate(BaseModel):
     action: str
 
 
+class RepositoryPayload(BaseModel):
+    full_name: str
+
+
+class GitHubIssuePayload(BaseModel):
+    number: int
+    title: str
+    body: str
+
+
+class GitHubIssueEvent(BaseModel):
+    action: str
+    repository: RepositoryPayload
+    issue: GitHubIssuePayload
+
+
 @app.get("/health")
 def get_health():
     return {"status": "ok"}
@@ -25,4 +41,16 @@ def post_issue(issue: IssueCreate):
         "issue_body": issue.body,
         "issue_repo": issue.repo,
         "issue_action": issue.action,
+    }
+
+
+@app.post("/dev/events/github")
+def receive_github_event(event: GitHubIssueEvent):
+    return {
+        "event_source": "github",
+        "repo": event.repository.full_name,
+        "action": event.action,
+        "issue_number": event.issue.number,
+        "issue_title": event.issue.title,
+        "issue_body": event.issue.body,
     }
