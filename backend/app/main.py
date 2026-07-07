@@ -8,6 +8,8 @@ class IssueCreate(BaseModel):
     number: int
     title: str
     body: str
+    repo: str
+    action: str
 
 
 @app.get("/health")
@@ -21,4 +23,6 @@ def post_issue(issue: IssueCreate):
         "issue_number": issue.number,
         "issue_title": issue.title,
         "issue_body": issue.body,
+        "issue_repo": issue.repo,
+        "issue_action": issue.action,
     }
