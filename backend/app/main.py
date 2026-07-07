@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import Literal
 
 app = FastAPI(title="IssueFlow Agent")
 
@@ -23,7 +24,7 @@ class GitHubIssuePayload(BaseModel):
 
 
 class GitHubIssueEvent(BaseModel):
-    action: str
+    action: Literal["opened", "edited", "closed", "reopened"]
     repository: RepositoryPayload
     issue: GitHubIssuePayload
 
