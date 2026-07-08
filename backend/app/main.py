@@ -29,16 +29,26 @@ class GitHubIssueEvent(BaseModel):
     issue: GitHubIssuePayload
 
 
-def normalize_github_issue_event(event: GitHubIssueEvent):
-    return {
-        "source": "github",
-        "event_type": "issue",
-        "repo": event.repository.full_name,
-        "action": event.action,
-        "issue_number": event.issue.number,
-        "issue_title": event.issue.title,
-        "issue_body": event.issue.body,
-    }
+class InternalIssueEvent(BaseModel):
+    source: Literal["github"]
+    event_type: Literal["issue"]
+    repo: str
+    action: Literal["opened", "edited", "closed", "reopened"]
+    issue_number: int
+    issue_title: str
+    issue_body: str
+
+
+def normalize_github_issue_event(event: GitHubIssueEvent) -> InternalIssueEvent:
+    return InternalIssueEvent(
+        source="github",
+        event_type="issue",
+        repo=event.repository.full_name,
+        action=event.action,
+        issue_number=event.issue.number,
+        issue_title=event.issue.title,
+        issue_body=event.issue.body,
+    )
 
 
 @app.get("/health")
