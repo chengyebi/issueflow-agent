@@ -3,6 +3,7 @@ from typing import Literal
 
 import psycopg
 from fastapi import FastAPI
+from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 app = FastAPI(title="IssueFlow Agent")
@@ -91,9 +92,40 @@ def save_issue_event(event: InternalIssueEvent) -> int:
             return row[0]
 
 
+def list_issue_events() -> list[dict]:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT
+                    id,
+                    source,
+                    event_type,
+                    repo,
+                    action,
+                    issue_number,
+                    issue_title,
+                    issue_body,
+                    created_at
+                FROM issue_events
+                ORDER BY id DESC
+                LIMIT 20;
+                """)
+            return cur.fetchall()
+
+
 @app.get("/health")
 def get_health():
     return {"status": "ok"}
+
+
+@app.get("/events")
+def get_events():
+    events = list_issue_events()
+
+    return {
+        "count": len(events),
+        "items": events,
+    }
 
 
 @app.post("/issues")
