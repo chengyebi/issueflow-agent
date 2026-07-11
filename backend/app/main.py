@@ -1,8 +1,12 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+import os
 from typing import Literal
 
+import psycopg
+from fastapi import FastAPI
+from pydantic import BaseModel
+
 app = FastAPI(title="IssueFlow Agent")
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 
 class IssueCreate(BaseModel):
@@ -51,6 +55,42 @@ def normalize_github_issue_event(event: GitHubIssueEvent) -> InternalIssueEvent:
     )
 
 
+def save_issue_event(event: InternalIssueEvent) -> int:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+            INSERT INTO issue_events(
+                source,
+                event_type,
+                repo,
+                action,
+                issue_number,
+                issue_title,
+                issue_body
+            ) VALUES(
+                %s,%s,%s,%s,%s,%s,%s
+            )
+            RETURNING id;
+            """,
+                (
+                    event.source,
+                    event.event_type,
+                    event.repo,
+                    event.action,
+                    event.issue_number,
+                    event.issue_title,
+                    event.issue_body,
+                ),
+            )
+            row = cur.fetchone()
+
+            if row is None:
+                raise RuntimeError("插入Issue事件后没有返回ID")
+
+            return row[0]
+
+
 @app.get("/health")
 def get_health():
     return {"status": "ok"}
@@ -69,4 +109,10 @@ def post_issue(issue: IssueCreate):
 
 @app.post("/dev/events/github")
 def receive_github_event(event: GitHubIssueEvent):
-    return normalize_github_issue_event(event)
+    internal_event = normalize_github_issue_event(event)
+    event_id = save_issue_event(internal_event)
+
+    return {
+        "event_id": event_id,
+        "event": internal_event,
+    }
