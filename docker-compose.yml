@@ -18,8 +18,13 @@ services:
       - POSTGRES_DB=issueflow
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+volumes:
+  postgres_data:
