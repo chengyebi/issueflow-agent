@@ -2,13 +2,14 @@ import os
 from typing import Literal
 
 import psycopg
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from psycopg.rows import dict_row
 from pydantic import BaseModel
+from app.github_webhook import verify_github_signature
 
 app = FastAPI(title="IssueFlow Agent")
 DATABASE_URL = os.environ["DATABASE_URL"]
-
+GITHUB_WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"]
 
 class IssueCreate(BaseModel):
     number: int
@@ -147,4 +148,27 @@ def receive_github_event(event: GitHubIssueEvent):
     return {
         "event_id": event_id,
         "event": internal_event,
+    }
+
+@app.post("/webhooks/github")
+async def receieve_github_webhook(request:Request):
+    payload_body = await request.body()
+
+    signature_header = request.headers.get(
+        "X-Hub-Signature-256"
+    )
+
+    signature_valid=verify_github_signature(
+        payload_body=payload_body,
+        secret=GITHUB_WEBHOOK_SECRET,
+        signature_header = signature_header,
+    )
+
+    if not signature_valid:
+        raise HTTPException(
+            status_code = 401,
+            detail = "Invalid Github signature",
+        )
+    return{
+        "status": "accepted",
     }
