@@ -4,7 +4,7 @@ from typing import Literal
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
 from psycopg.rows import dict_row
-from pydantic import BaseModel
+from pydantic import BaseModel,ValidationError
 from app.github_webhook import verify_github_signature
 
 app = FastAPI(title="IssueFlow Agent")
@@ -28,6 +28,8 @@ class GitHubIssuePayload(BaseModel):
     title: str
     body: str
 
+class GitHubIssueActionPayload(BaseModel):
+    action: str
 
 class GitHubIssueEvent(BaseModel):
     action: Literal["opened", "edited", "closed", "reopened"]
@@ -222,6 +224,15 @@ async def receive_github_webhook(request: Request):
             status_code=400,
             detail="Missing GitHub delivery header",
         )
+    try:
+        action_payload = GitHubIssueActionPayload.model_validate_json(
+        payload_body
+    )
+    except ValidationError as exc:
+        raise HTTPException(
+        status_code=422,
+        detail="Invalid GitHub issues payload",
+    ) from exc
 
     is_new_delivery = save_webhook_delivery(
     delivery_id=delivery_id,
@@ -233,11 +244,27 @@ async def receive_github_webhook(request: Request):
         return {
         "status": "duplicate",
         "event": event_name,
+        "action": action_payload.action,
         "delivery_id": delivery_id,
     }
 
+    supported_actions = {
+    "opened",
+    "edited",
+    "closed",
+    "reopened",
+    }
+
+    if action_payload.action not in supported_actions:
+        return {
+        "status": "ignored",
+        "event": event_name,
+        "action": action_payload.action,
+        "delivery_id": delivery_id,
+    }
     return {
         "status": "accepted",
         "event": event_name,
+        "action": action_payload.action,
         "delivery_id": delivery_id,
     }
