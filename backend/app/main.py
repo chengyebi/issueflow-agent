@@ -92,6 +92,38 @@ def save_issue_event(event: InternalIssueEvent) -> int:
 
             return row[0]
 
+def save_webhook_delivery(
+    delivery_id: str,
+    event_name: str,
+    payload_body: bytes,
+) -> bool:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO webhook_deliveries (
+                    delivery_id,
+                    event_name,
+                    raw_payload
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s::jsonb
+                )
+                ON CONFLICT (delivery_id) DO NOTHING
+                RETURNING id;
+                """,
+                (
+                    delivery_id,
+                    event_name,
+                    payload_body.decode("utf-8"),
+                ),
+            )
+
+            row = cur.fetchone()
+
+            return row is not None
 
 def list_issue_events() -> list[dict]:
     with psycopg.connect(DATABASE_URL) as conn:
@@ -151,7 +183,7 @@ def receive_github_event(event: GitHubIssueEvent):
     }
 
 @app.post("/webhooks/github")
-async def receive_github_webhook(request:Request):
+async def receive_github_webhook(request: Request):
     payload_body = await request.body()
 
     signature_header = request.headers.get(
@@ -176,17 +208,34 @@ async def receive_github_webhook(request:Request):
             status_code=400,
             detail="Missing GitHub event header",
         )
+
     if event_name != "issues":
         return{
         "status" : "ignored",
         "event" : event_name,
         }
+
     delivery_id=request.headers.get("X-GitHub-Delivery")
+
     if not delivery_id:
         raise HTTPException(
             status_code=400,
             detail="Missing GitHub delivery header",
         )
+
+    is_new_delivery = save_webhook_delivery(
+    delivery_id=delivery_id,
+    event_name=event_name,
+    payload_body=payload_body,
+    )
+
+    if not is_new_delivery:
+        return {
+        "status": "duplicate",
+        "event": event_name,
+        "delivery_id": delivery_id,
+    }
+
     return {
         "status": "accepted",
         "event": event_name,
