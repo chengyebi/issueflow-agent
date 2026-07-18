@@ -151,7 +151,7 @@ def receive_github_event(event: GitHubIssueEvent):
     }
 
 @app.post("/webhooks/github")
-async def receieve_github_webhook(request:Request):
+async def receive_github_webhook(request:Request):
     payload_body = await request.body()
 
     signature_header = request.headers.get(
@@ -167,8 +167,21 @@ async def receieve_github_webhook(request:Request):
     if not signature_valid:
         raise HTTPException(
             status_code = 401,
-            detail = "Invalid Github signature",
+            detail = "Invalid GitHub signature",
         )
-    return{
+    event_name = request.headers.get("X-GitHub-Event")
+
+    if event_name is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing GitHub event header",
+        )
+    if event_name != "issues":
+        return{
+        "status" : "ignored",
+        "event" : event_name,
+        }
+    return {
         "status": "accepted",
+        "event": event_name,
     }
