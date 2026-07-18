@@ -181,7 +181,14 @@ async def receive_github_webhook(request:Request):
         "status" : "ignored",
         "event" : event_name,
         }
+    delivery_id=request.headers.get("X-GitHub-Delivery")
+    if not delivery_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing GitHub delivery header",
+        )
     return {
         "status": "accepted",
         "event": event_name,
+        "delivery_id": delivery_id,
     }
