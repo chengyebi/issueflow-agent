@@ -36,7 +36,6 @@ class GitHubIssueEvent(BaseModel):
     repository: RepositoryPayload
     issue: GitHubIssuePayload
 
-
 class InternalIssueEvent(BaseModel):
     source: Literal["github"]
     event_type: Literal["issue"]
@@ -127,6 +126,87 @@ def save_webhook_delivery(
 
             return row is not None
 
+def save_webhook_and_issue_event(
+    delivery_id: str,
+    event_name: str,
+    payload_body: bytes,
+    event: InternalIssueEvent,
+) -> tuple[bool, int | None]:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO webhook_deliveries (
+                    delivery_id,
+                    event_name,
+                    raw_payload
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s::jsonb
+                )
+                ON CONFLICT (delivery_id) DO NOTHING
+                RETURNING id;
+                """,
+                (
+                    delivery_id,
+                    event_name,
+                    payload_body.decode("utf-8"),
+                ),
+            )
+
+            delivery_row = cur.fetchone()
+
+            if delivery_row is None:
+                return False, None
+
+            webhook_delivery_id = delivery_row[0]
+
+            cur.execute(
+                """
+                INSERT INTO issue_events (
+                    source,
+                    event_type,
+                    repo,
+                    action,
+                    issue_number,
+                    issue_title,
+                    issue_body,
+                    webhook_delivery_id
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                RETURNING id;
+                """,
+                (
+                    event.source,
+                    event.event_type,
+                    event.repo,
+                    event.action,
+                    event.issue_number,
+                    event.issue_title,
+                    event.issue_body,
+                    webhook_delivery_id,
+                ),
+            )
+
+            issue_row = cur.fetchone()
+
+            if issue_row is None:
+                raise RuntimeError(
+                    "插入 Issue 事件后没有返回 ID"
+                )
+
+            return True, issue_row[0]
 def list_issue_events() -> list[dict]:
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -234,37 +314,73 @@ async def receive_github_webhook(request: Request):
         detail="Invalid GitHub issues payload",
     ) from exc
 
-    is_new_delivery = save_webhook_delivery(
-    delivery_id=delivery_id,
-    event_name=event_name,
-    payload_body=payload_body,
-    )
-
-    if not is_new_delivery:
-        return {
-        "status": "duplicate",
-        "event": event_name,
-        "action": action_payload.action,
-        "delivery_id": delivery_id,
-    }
-
     supported_actions = {
     "opened",
     "edited",
     "closed",
     "reopened",
-    }
+}
 
+    # 不支持的 action：只保存原始 Webhook，不生成 Issue Event
     if action_payload.action not in supported_actions:
+        is_new_delivery = save_webhook_delivery(
+            delivery_id=delivery_id,
+            event_name=event_name,
+            payload_body=payload_body,
+        )
+
+        if not is_new_delivery:
+            return {
+                "status": "duplicate",
+                "event": event_name,
+                "action": action_payload.action,
+                "delivery_id": delivery_id,
+            }
+
         return {
-        "status": "ignored",
-        "event": event_name,
-        "action": action_payload.action,
-        "delivery_id": delivery_id,
-    }
+            "status": "ignored",
+            "event": event_name,
+            "action": action_payload.action,
+            "delivery_id": delivery_id,
+        }
+
+    # 支持的 action：解析完整的 GitHub Issue 事件
+    try:
+        github_event = GitHubIssueEvent.model_validate_json(
+            payload_body
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid GitHub issue event payload",
+        ) from exc
+
+    internal_event = normalize_github_issue_event(
+        github_event
+    )
+
+    # 在同一个数据库事务中保存两张表
+    is_new_delivery, issue_event_id = (
+        save_webhook_and_issue_event(
+            delivery_id=delivery_id,
+            event_name=event_name,
+            payload_body=payload_body,
+            event=internal_event,
+        )
+    )
+
+    if not is_new_delivery:
+        return {
+            "status": "duplicate",
+            "event": event_name,
+            "action": action_payload.action,
+            "delivery_id": delivery_id,
+        }
+
     return {
         "status": "accepted",
         "event": event_name,
         "action": action_payload.action,
         "delivery_id": delivery_id,
+        "issue_event_id": issue_event_id,
     }
