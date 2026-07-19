@@ -6,6 +6,11 @@ from fastapi import FastAPI, HTTPException, Request
 from psycopg.rows import dict_row
 from pydantic import BaseModel,ValidationError
 from app.github_webhook import verify_github_signature
+from app.agent import (
+    IssueAgentRequest,
+    IssueAgentResponse,
+    run_issue_agent,
+)
 
 app = FastAPI(title="IssueFlow Agent")
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -227,7 +232,6 @@ def list_issue_events() -> list[dict]:
                 """)
             return cur.fetchall()
 
-
 @app.get("/health")
 def get_health():
     return {"status": "ok"}
@@ -384,3 +388,18 @@ async def receive_github_webhook(request: Request):
         "delivery_id": delivery_id,
         "issue_event_id": issue_event_id,
     }
+
+@app.post(
+    "/agent/analyze",
+    response_model=IssueAgentResponse,
+)
+def analyze_issue_with_agent(
+    issue: IssueAgentRequest,
+):
+    try:
+        return run_issue_agent(issue)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Agent analysis failed: {exc}",
+        ) from exc
