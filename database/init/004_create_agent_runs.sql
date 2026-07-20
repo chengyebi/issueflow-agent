@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     error_message TEXT,
+    result_json JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
