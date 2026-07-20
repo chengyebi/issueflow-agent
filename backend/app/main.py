@@ -11,6 +11,7 @@ from app.agent import (
     IssueAgentResponse,
     run_issue_agent,
 )
+from app.job_queue import enqueue_issue_agent_run
 
 app = FastAPI(title="IssueFlow Agent")
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -232,6 +233,60 @@ def list_issue_events() -> list[dict]:
                 """)
             return cur.fetchall()
 
+def create_agent_run(issue_event_id: int) -> int:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_runs (issue_event_id)
+                VALUES (%s)
+                RETURNING id;
+                """,
+                (issue_event_id,),
+            )
+
+            row = cur.fetchone()
+
+            if row is None:
+                raise RuntimeError("创建 Agent Run 后没有返回 ID")
+
+            return row[0]
+
+
+def save_agent_run_job_id(
+    agent_run_id: int,
+    rq_job_id: str,
+) -> None:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE agent_runs
+                SET rq_job_id = %s
+                WHERE id = %s;
+                """,
+                (rq_job_id, agent_run_id),
+            )
+
+
+def mark_agent_run_failed(
+    agent_run_id: int,
+    error_message: str,
+) -> None:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE agent_runs
+                SET
+                    status = 'failed',
+                    finished_at = NOW(),
+                    error_message = %s
+                WHERE id = %s;
+                """,
+                (error_message, agent_run_id),
+            )
+
 @app.get("/health")
 def get_health():
     return {"status": "ok"}
@@ -380,13 +435,35 @@ async def receive_github_webhook(request: Request):
             "action": action_payload.action,
             "delivery_id": delivery_id,
         }
+    if issue_event_id is None:
+        raise RuntimeError("新的 Webhook 没有生成 Issue Event ID")
 
+    agent_run_id = create_agent_run(issue_event_id)
+
+    try:
+        rq_job_id = enqueue_issue_agent_run(agent_run_id)
+        save_agent_run_job_id(
+            agent_run_id=agent_run_id,
+            rq_job_id=rq_job_id,
+        )
+    except Exception as exc:
+        mark_agent_run_failed(
+            agent_run_id=agent_run_id,
+            error_message=f"RQ enqueue failed: {exc}",
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail="Agent job enqueue failed",
+        ) from exc
     return {
         "status": "accepted",
         "event": event_name,
         "action": action_payload.action,
         "delivery_id": delivery_id,
         "issue_event_id": issue_event_id,
+        "agent_run_id": agent_run_id,
+        "rq_job_id": rq_job_id,
     }
 
 @app.post(

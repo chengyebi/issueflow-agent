@@ -16,6 +16,19 @@ services:
       - postgres
       - redis
 
+  worker:
+    build: ./backend
+    command: sh -lc 'rq worker issueflow --url "$$REDIS_URL"'
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/issueflow
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - CHAT_MODEL=${CHAT_MODEL}
+    depends_on:
+      - postgres
+      - redis
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
