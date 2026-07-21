@@ -9,6 +9,75 @@ from app.agent import IssueAgentRequest, run_issue_agent
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
+def save_completed_run_and_create_review(
+    agent_run_id: int,
+    result: dict,
+) -> None:
+    actions = result.get("proposed_actions", [])
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE agent_runs
+                SET
+                    status = 'completed',
+                    finished_at = NOW(),
+                    result_json = %s,
+                    error_message = NULL
+                WHERE id = %s;
+                """,
+                (Jsonb(result), agent_run_id),
+            )
+
+            cur.execute(
+                """
+                INSERT INTO review_tasks (agent_run_id)
+                VALUES (%s)
+                ON CONFLICT (agent_run_id)
+                DO UPDATE SET
+                    agent_run_id = EXCLUDED.agent_run_id
+                RETURNING id;
+                """,
+                (agent_run_id,),
+            )
+
+            row = cur.fetchone()
+
+            if row is None:
+                raise RuntimeError("创建审核任务后没有返回 ID")
+
+            review_task_id = row[0]
+
+            for index, action in enumerate(actions):
+                command_type = action["type"]
+                command_value = action["value"]
+
+                idempotency_key = (
+                    f"agent-run:{agent_run_id}:"
+                    f"action:{index}:{command_type}"
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO github_commands (
+                        review_task_id,
+                        command_type,
+                        payload,
+                        idempotency_key
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (idempotency_key)
+                    DO NOTHING;
+                    """,
+                    (
+                        review_task_id,
+                        command_type,
+                        Jsonb({"value": command_value}),
+                        idempotency_key,
+                    ),
+                )
+
 def process_issue_agent_run(agent_run_id: int) -> dict:
     # 第一步：查询任务对应的 Issue，并把任务标记为 running
     with psycopg.connect(DATABASE_URL) as conn:
@@ -66,23 +135,10 @@ def process_issue_agent_run(agent_run_id: int) -> dict:
         result = response.model_dump(mode="json")
 
         # 第四步：成功后保存结果
-        with psycopg.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE agent_runs
-                    SET
-                        status = 'completed',
-                        finished_at = NOW(),
-                        result_json = %s,
-                        error_message = NULL
-                    WHERE id = %s;
-                    """,
-                    (
-                        Jsonb(result),
-                        agent_run_id,
-                    ),
-                )
+        save_completed_run_and_create_review(
+        agent_run_id=agent_run_id,
+        result=result,
+        )
 
         return result
 
