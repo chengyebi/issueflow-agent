@@ -51,6 +51,9 @@ class InternalIssueEvent(BaseModel):
     issue_title: str
     issue_body: str
 
+class ReviewDecisionRequest(BaseModel):
+    reviewer: str
+    review_note: str | None = None
 
 def normalize_github_issue_event(event: GitHubIssueEvent) -> InternalIssueEvent:
     return InternalIssueEvent(
@@ -295,6 +298,96 @@ def list_review_tasks(status: str | None = None) -> list[dict]:
                 results.append(review)
 
             return results
+
+def decide_review_task(
+    review_task_id: int,
+    decision: Literal["approved", "rejected"],
+    reviewer: str,
+    review_note: str | None,
+) -> dict:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.transaction():
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        status
+                    FROM review_tasks
+                    WHERE id = %s
+                    FOR UPDATE;
+                    """,
+                    (review_task_id,),
+                )
+
+                review_task = cur.fetchone()
+
+                if review_task is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Review task not found",
+                    )
+
+                if review_task["status"] != "pending":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Review task has already been decided: "
+                            f"{review_task['status']}"
+                        ),
+                    )
+
+                cur.execute(
+                    """
+                    UPDATE review_tasks
+                    SET
+                        status = %s,
+                        reviewer = %s,
+                        review_note = %s,
+                        reviewed_at = NOW()
+                    WHERE id = %s
+                    RETURNING
+                        id,
+                        status,
+                        reviewer,
+                        review_note,
+                        reviewed_at;
+                    """,
+                    (
+                        decision,
+                        reviewer,
+                        review_note,
+                        review_task_id,
+                    ),
+                )
+
+                updated_review = cur.fetchone()
+
+                cur.execute(
+                    """
+                    UPDATE github_commands
+                    SET
+                        status = %s,
+                        updated_at = NOW()
+                    WHERE review_task_id = %s
+                      AND status = 'proposed'
+                    RETURNING id;
+                    """,
+                    (
+                        decision,
+                        review_task_id,
+                    ),
+                )
+
+                command_ids = [
+                    row["id"]
+                    for row in cur.fetchall()
+                ]
+
+    return {
+        "review_task": updated_review,
+        "updated_command_ids": command_ids,
+    }
 
 def create_agent_run(issue_event_id: int) -> int:
     with psycopg.connect(DATABASE_URL) as conn:
@@ -563,3 +656,28 @@ def analyze_issue_with_agent(
             status_code=502,
             detail=f"Agent analysis failed: {exc}",
         ) from exc
+
+@app.post("/review-tasks/{review_task_id}/approve")
+def approve_review_task(
+    review_task_id: int,
+    request: ReviewDecisionRequest,
+):
+    return decide_review_task(
+        review_task_id=review_task_id,
+        decision="approved",
+        reviewer=request.reviewer,
+        review_note=request.review_note,
+    )
+
+
+@app.post("/review-tasks/{review_task_id}/reject")
+def reject_review_task(
+    review_task_id: int,
+    request: ReviewDecisionRequest,
+):
+    return decide_review_task(
+        review_task_id=review_task_id,
+        decision="rejected",
+        reviewer=request.reviewer,
+        review_note=request.review_note,
+    )
