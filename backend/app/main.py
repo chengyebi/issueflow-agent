@@ -213,6 +213,7 @@ def save_webhook_and_issue_event(
                 )
 
             return True, issue_row[0]
+
 def list_issue_events() -> list[dict]:
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -232,6 +233,68 @@ def list_issue_events() -> list[dict]:
                 LIMIT 20;
                 """)
             return cur.fetchall()
+
+def list_review_tasks(status: str | None = None) -> list[dict]:
+    query = """
+        SELECT
+            rt.id AS review_task_id,
+            rt.status AS review_status,
+            rt.reviewer,
+            rt.review_note,
+            rt.created_at,
+            rt.reviewed_at,
+
+            ar.id AS agent_run_id,
+            ar.result_json,
+
+            ie.repo,
+            ie.issue_number,
+            ie.issue_title,
+            ie.issue_body
+
+        FROM review_tasks rt
+        JOIN agent_runs ar
+            ON ar.id = rt.agent_run_id
+        JOIN issue_events ie
+            ON ie.id = ar.issue_event_id
+    """
+
+    params = []
+
+    if status is not None:
+        query += " WHERE rt.status = %s"
+        params.append(status)
+
+    query += " ORDER BY rt.id DESC"
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            review_rows = cur.fetchall()
+
+            results = []
+
+            for review in review_rows:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        command_type,
+                        payload,
+                        status,
+                        idempotency_key,
+                        error_message
+                    FROM github_commands
+                    WHERE review_task_id = %s
+                    ORDER BY id;
+                    """,
+                    (review["review_task_id"],),
+                )
+
+                review["commands"] = cur.fetchall()
+                results.append(review)
+
+            return results
 
 def create_agent_run(issue_event_id: int) -> int:
     with psycopg.connect(DATABASE_URL) as conn:
@@ -301,6 +364,26 @@ def get_events():
         "items": events,
     }
 
+@app.get("/review-tasks")
+def get_review_tasks(status: str | None = None):
+    allowed_statuses = {
+        "pending",
+        "approved",
+        "rejected",
+    }
+
+    if status is not None and status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid review status",
+        )
+
+    items = list_review_tasks(status)
+
+    return {
+        "count": len(items),
+        "items": items,
+    }
 
 @app.post("/issues")
 def post_issue(issue: IssueCreate):
