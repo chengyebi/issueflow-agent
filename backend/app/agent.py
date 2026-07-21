@@ -15,6 +15,13 @@ Category = Literal[
     "other",
 ]
 
+CATEGORY_TO_GITHUB_LABEL = {
+    "bug": "bug",
+    "feature": "enhancement",
+    "question": "question",
+    "documentation": "documentation",
+}
+
 Priority = Literal[
     "low",
     "medium",
@@ -279,12 +286,19 @@ def draft_review(
 def prepare_actions(
     state: IssueAgentState,
 ) -> dict:
-    actions = [
-        {
-            "type": "add_label",
-            "value": state["category"],
-        }
-    ]
+    actions = []
+
+    label = CATEGORY_TO_GITHUB_LABEL.get(
+        state["category"]
+    )
+
+    if label is not None:
+        actions.append(
+            {
+                "type": "add_label",
+                "value": label,
+            }
+        )
 
     if state["suggested_reply"].strip():
         actions.append(
