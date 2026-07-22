@@ -5,7 +5,10 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.agent import IssueAgentRequest, run_issue_agent
-
+from app.github_client import (
+    add_issue_label,
+    post_issue_comment,
+)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
@@ -163,3 +166,186 @@ def process_issue_agent_run(agent_run_id: int) -> dict:
 
         # 必须继续抛出，让 RQ 知道这个任务失败了
         raise
+
+def process_github_command(command_id: int) -> dict:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    gc.id,
+                    gc.command_type,
+                    gc.payload,
+                    gc.status AS command_status,
+                    rt.status AS review_status,
+                    ie.repo,
+                    ie.issue_number
+                FROM github_commands gc
+                JOIN review_tasks rt
+                    ON rt.id = gc.review_task_id
+                JOIN agent_runs ar
+                    ON ar.id = rt.agent_run_id
+                JOIN issue_events ie
+                    ON ie.id = ar.issue_event_id
+                WHERE gc.id = %s
+                FOR UPDATE OF gc;
+                """,
+                (command_id,),
+            )
+
+            command = cur.fetchone()
+
+            if command is None:
+                raise ValueError(
+                    f"GitHub Command 不存在: {command_id}"
+                )
+
+            if (
+                command["review_status"] != "approved"
+                or command["command_status"] != "approved"
+            ):
+                return {
+                    "command_id": command_id,
+                    "status": command["command_status"],
+                    "skipped": True,
+                }
+
+            cur.execute(
+                """
+                UPDATE github_commands
+                SET
+                    status = 'executing',
+                    updated_at = NOW(),
+                    error_message = NULL
+                WHERE id = %s;
+                """,
+                (command_id,),
+            )
+
+    try:
+        payload = command["payload"] or {}
+        value = payload.get("value")
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                "GitHub Command payload.value 必须是非空字符串"
+            )
+
+        if command["command_type"] == "add_label":
+            labels = add_issue_label(
+                repo=command["repo"],
+                issue_number=command["issue_number"],
+                label=value,
+            )
+
+            result = {
+                "label": value,
+                "labels": [
+                    item.get("name")
+                    for item in labels
+                ],
+            }
+
+        elif command["command_type"] == "post_comment":
+            comment = post_issue_comment(
+                repo=command["repo"],
+                issue_number=command["issue_number"],
+                body=value,
+            )
+
+            result = {
+                "comment_id": comment.get("id"),
+                "comment_url": comment.get("html_url"),
+            }
+
+        else:
+            raise ValueError(
+                "不支持的 GitHub Command 类型: "
+                f"{command['command_type']}"
+            )
+
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE github_commands
+                    SET
+                        status = 'executed',
+                        updated_at = NOW(),
+                        executed_at = NOW(),
+                        error_message = NULL
+                    WHERE id = %s
+                      AND status = 'executing';
+                    """,
+                    (command_id,),
+                )
+
+        return {
+            "command_id": command_id,
+            "status": "executed",
+            "result": result,
+        }
+
+    except Exception as exc:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE github_commands
+                    SET
+                        status = 'failed',
+                        updated_at = NOW(),
+                        error_message = %s
+                    WHERE id = %s
+                      AND status = 'executing';
+                    """,
+                    (
+                        str(exc),
+                        command_id,
+                    ),
+                )
+
+        raise
+
+
+def process_review_commands(
+    review_task_id: int,
+) -> dict:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM github_commands
+                WHERE review_task_id = %s
+                  AND status = 'approved'
+                ORDER BY id;
+                """,
+                (review_task_id,),
+            )
+
+            command_ids = [
+                row["id"]
+                for row in cur.fetchall()
+            ]
+
+    results = []
+
+    for command_id in command_ids:
+        try:
+            results.append(
+                process_github_command(command_id)
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "command_id": command_id,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+
+    return {
+        "review_task_id": review_task_id,
+        "commands": results,
+    }

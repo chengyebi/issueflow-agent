@@ -11,7 +11,10 @@ from app.agent import (
     IssueAgentResponse,
     run_issue_agent,
 )
-from app.job_queue import enqueue_issue_agent_run
+from app.job_queue import (
+    enqueue_issue_agent_run,
+    enqueue_review_commands,
+)
 
 app = FastAPI(title="IssueFlow Agent")
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -662,12 +665,33 @@ def approve_review_task(
     review_task_id: int,
     request: ReviewDecisionRequest,
 ):
-    return decide_review_task(
+    result = decide_review_task(
         review_task_id=review_task_id,
         decision="approved",
         reviewer=request.reviewer,
         review_note=request.review_note,
     )
+
+    rq_job_id = None
+
+    if result["updated_command_ids"]:
+        try:
+            rq_job_id = enqueue_review_commands(
+                review_task_id
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Review 已批准，但 GitHub 命令"
+                    f"投递失败: {exc}"
+                ),
+            ) from exc
+
+    return {
+        **result,
+        "rq_job_id": rq_job_id,
+    }
 
 
 @app.post("/review-tasks/{review_task_id}/reject")

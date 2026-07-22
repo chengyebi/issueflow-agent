@@ -3,7 +3,10 @@ import os
 from redis import Redis
 from rq import Queue
 
-from app.tasks import process_issue_agent_run
+from app.tasks import (
+    process_issue_agent_run,
+    process_review_commands,
+)
 
 
 REDIS_URL = os.environ["REDIS_URL"]
@@ -17,6 +20,17 @@ def enqueue_issue_agent_run(agent_run_id: int) -> str:
         process_issue_agent_run,
         agent_run_id,
         job_timeout=180,
+    )
+
+    return job.id
+
+def enqueue_review_commands(
+    review_task_id: int,
+) -> str:
+    job = issue_queue.enqueue(
+        process_review_commands,
+        review_task_id,
+        job_timeout=120,
     )
 
     return job.id
