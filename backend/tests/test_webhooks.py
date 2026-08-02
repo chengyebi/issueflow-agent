@@ -1,0 +1,122 @@
+import hashlib
+import hmac
+import json
+
+from app.api import webhooks
+from app.services.events import AcceptedIssueDelivery
+
+SECRET = "test-webhook-secret"
+
+
+def _payload(action: str = "opened") -> bytes:
+    return json.dumps(
+        {
+            "action": action,
+            "repository": {"full_name": "owner/repo"},
+            "issue": {"number": 7, "title": "Broken", "body": "Steps"},
+        }
+    ).encode()
+
+
+def _headers(payload: bytes, delivery: str = "delivery-1") -> dict[str, str]:
+    signature = "sha256=" + hmac.new(SECRET.encode(), payload, hashlib.sha256).hexdigest()
+    return {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "issues",
+        "X-GitHub-Delivery": delivery,
+        "Content-Type": "application/json",
+    }
+
+
+def test_missing_signature_is_rejected(client):
+    response = client.post(
+        "/webhooks/github",
+        content=_payload(),
+        headers={"X-GitHub-Event": "issues", "X-GitHub-Delivery": "d"},
+    )
+    assert response.status_code == 401
+
+
+def test_invalid_signature_is_rejected(client):
+    headers = _headers(_payload())
+    headers["X-Hub-Signature-256"] = "sha256=invalid"
+    response = client.post("/webhooks/github", content=_payload(), headers=headers)
+    assert response.status_code == 401
+
+
+def test_valid_signature_accepts_and_enqueues(client, monkeypatch):
+    payload = _payload()
+    monkeypatch.setattr(
+        webhooks,
+        "accept_issue_delivery",
+        lambda *args: AcceptedIssueDelivery(True, issue_event_id=11, agent_run_id=22),
+    )
+    monkeypatch.setattr(webhooks, "enqueue_issue_agent_run", lambda run_id: "job-1")
+    saved = {}
+    monkeypatch.setattr(
+        webhooks,
+        "save_agent_run_job_id",
+        lambda run_id, job_id: saved.update(run_id=run_id, job_id=job_id),
+    )
+
+    response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert response.json()["rq_job_id"] == "job-1"
+    assert saved == {"run_id": 22, "job_id": "job-1"}
+
+
+def test_duplicate_delivery_does_not_enqueue(client, monkeypatch):
+    payload = _payload()
+    monkeypatch.setattr(
+        webhooks,
+        "accept_issue_delivery",
+        lambda *args: AcceptedIssueDelivery(False),
+    )
+    monkeypatch.setattr(
+        webhooks,
+        "enqueue_issue_agent_run",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not enqueue")),
+    )
+    response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
+    assert response.status_code == 200
+    assert response.json()["status"] == "duplicate"
+
+
+def test_unsupported_action_is_stored_but_not_enqueued(client, monkeypatch):
+    payload = _payload("labeled")
+    monkeypatch.setattr(webhooks, "save_webhook_delivery", lambda *args: True)
+    monkeypatch.setattr(
+        webhooks,
+        "enqueue_issue_agent_run",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not enqueue")),
+    )
+    response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+
+
+def test_enqueue_failure_marks_run_failed(client, monkeypatch):
+    payload = _payload()
+    monkeypatch.setattr(
+        webhooks,
+        "accept_issue_delivery",
+        lambda *args: AcceptedIssueDelivery(True, issue_event_id=11, agent_run_id=22),
+    )
+    monkeypatch.setattr(
+        webhooks,
+        "enqueue_issue_agent_run",
+        lambda *_: (_ for _ in ()).throw(ConnectionError("redis unavailable")),
+    )
+    marked = {}
+    monkeypatch.setattr(
+        webhooks,
+        "mark_agent_run_failed",
+        lambda run_id, message: marked.update(run_id=run_id, message=message),
+    )
+    response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
+    assert response.status_code == 503
+    assert marked["run_id"] == 22
+    assert "redis unavailable" not in response.text
+

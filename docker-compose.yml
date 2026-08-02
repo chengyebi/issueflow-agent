@@ -1,4 +1,13 @@
 services:
+  migrate:
+    build: ./backend
+    command: alembic upgrade head
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/issueflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   backend:
     build: ./backend
     ports:
@@ -12,9 +21,16 @@ services:
       - LLM_BASE_URL=${LLM_BASE_URL}
       - CHAT_MODEL=${CHAT_MODEL}
 
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     depends_on:
-      - postgres
-      - redis
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
   worker:
     build: ./backend
@@ -27,8 +43,10 @@ services:
       - CHAT_MODEL=${CHAT_MODEL}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
     depends_on:
-      - postgres
-      - redis
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -41,10 +59,20 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d issueflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 volumes:
   postgres_data:

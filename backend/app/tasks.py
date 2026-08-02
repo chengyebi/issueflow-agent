@@ -1,16 +1,15 @@
-import os
-
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.agent import IssueAgentRequest, run_issue_agent
+from app.core.config import get_settings
 from app.github_client import (
     add_issue_label,
     post_issue_comment,
 )
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = get_settings().database_url
 
 def save_completed_run_and_create_review(
     agent_run_id: int,

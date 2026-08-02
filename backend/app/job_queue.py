@@ -1,36 +1,5 @@
-import os
+"""Backward-compatible queue imports."""
 
-from redis import Redis
-from rq import Queue
+from app.workers.queue import enqueue_issue_agent_run, enqueue_review_commands
 
-from app.tasks import (
-    process_issue_agent_run,
-    process_review_commands,
-)
-
-
-REDIS_URL = os.environ["REDIS_URL"]
-
-redis_connection = Redis.from_url(REDIS_URL)
-issue_queue = Queue("issueflow", connection=redis_connection)
-
-
-def enqueue_issue_agent_run(agent_run_id: int) -> str:
-    job = issue_queue.enqueue(
-        process_issue_agent_run,
-        agent_run_id,
-        job_timeout=180,
-    )
-
-    return job.id
-
-def enqueue_review_commands(
-    review_task_id: int,
-) -> str:
-    job = issue_queue.enqueue(
-        process_review_commands,
-        review_task_id,
-        job_timeout=120,
-    )
-
-    return job.id
+__all__ = ["enqueue_issue_agent_run", "enqueue_review_commands"]

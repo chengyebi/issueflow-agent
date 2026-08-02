@@ -1,23 +1,6 @@
-import hashlib
-import hmac
+"""Backward-compatible webhook security import."""
 
-def verify_github_signature(
-        payload_body,
-        secret,
-        signature_header
-        ) ->bool:
-    if signature_header is None:
-        return False
+from app.core.security import verify_github_signature
 
-    hmac_result=hmac.new(
-        secret.encode("utf-8"),
-        msg=payload_body,
-        digestmod=hashlib.sha256,
-    )
-
-    expected_signature="sha256="+hmac_result.hexdigest()
-
-    return hmac.compare_digest(
-        expected_signature,
-        signature_header)
+__all__ = ["verify_github_signature"]
 
