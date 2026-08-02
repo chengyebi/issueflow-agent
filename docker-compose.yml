@@ -20,6 +20,11 @@ services:
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}
       - CHAT_MODEL=${CHAT_MODEL}
+      - AGENT_MODE=${AGENT_MODE:-workflow}
+      - PROMPT_VERSION=${PROMPT_VERSION:-triage-v2}
+      - AGENT_VERSION=${AGENT_VERSION:-workflow-v2}
+      - LLM_INPUT_COST_PER_MILLION_USD=${LLM_INPUT_COST_PER_MILLION_USD:-}
+      - LLM_OUTPUT_COST_PER_MILLION_USD=${LLM_OUTPUT_COST_PER_MILLION_USD:-}
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -41,6 +46,13 @@ services:
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}
       - CHAT_MODEL=${CHAT_MODEL}
+      - AGENT_MODE=${AGENT_MODE:-workflow}
+      - PROMPT_VERSION=${PROMPT_VERSION:-triage-v2}
+      - AGENT_VERSION=${AGENT_VERSION:-workflow-v2}
+      - RQ_MAX_RETRIES=${RQ_MAX_RETRIES:-2}
+      - RQ_RETRY_INTERVALS=${RQ_RETRY_INTERVALS:-10,30}
+      - LLM_INPUT_COST_PER_MILLION_USD=${LLM_INPUT_COST_PER_MILLION_USD:-}
+      - LLM_OUTPUT_COST_PER_MILLION_USD=${LLM_OUTPUT_COST_PER_MILLION_USD:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
     depends_on:
       migrate:

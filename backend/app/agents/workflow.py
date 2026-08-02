@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
+from app.core.tracing import TraceSession, current_trace, trace_node, use_trace
 
 Category = Literal["bug", "feature", "question", "documentation", "other"]
 Priority = Literal["low", "medium", "high", "critical"]
@@ -99,9 +100,39 @@ def get_llm() -> ChatOpenAI:
     )
 
 
+def _usage_from_message(message) -> tuple[int, int]:
+    usage = getattr(message, "usage_metadata", None) or {}
+    if usage:
+        return int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
+    metadata = getattr(message, "response_metadata", None) or {}
+    token_usage = metadata.get("token_usage", {})
+    return int(token_usage.get("prompt_tokens", 0)), int(
+        token_usage.get("completion_tokens", 0)
+    )
+
+
+def invoke_structured(schema, messages):
+    model = get_llm().with_structured_output(
+        schema, method="function_calling", include_raw=True
+    )
+    response = model.invoke(messages)
+    parsed = response.get("parsed") if isinstance(response, dict) else response
+    raw = response.get("raw") if isinstance(response, dict) else None
+    trace = current_trace()
+    if raw is not None and trace is not None:
+        trace.add_usage(*_usage_from_message(raw))
+    if parsed is None:
+        if trace is not None:
+            trace.structured_output_success = False
+        parsing_error = response.get("parsing_error") if isinstance(response, dict) else None
+        raise ValueError(f"结构化输出解析失败: {type(parsing_error).__name__}")
+    return parsed
+
+
+@trace_node("triage_issue")
 def triage_issue(state: IssueAgentState) -> dict:
-    model = get_llm().with_structured_output(TriageResult, method="function_calling")
-    result = model.invoke(
+    result = invoke_structured(
+        TriageResult,
         [
             (
                 "system",
@@ -115,7 +146,7 @@ def triage_issue(state: IssueAgentState) -> dict:
                 f"仓库：{state['repo']}\nIssue 编号：{state['issue_number']}\n"
                 f"标题：{state['title']}\n正文：\n{state['body']}",
             ),
-        ]
+        ],
     )
     return result.model_dump()
 
@@ -126,6 +157,7 @@ def route_after_triage(
     return "security_review" if state["risk_level"] == "high" else "draft_review"
 
 
+@trace_node("security_review")
 def security_review(_: IssueAgentState) -> dict:
     return {
         "missing_repro_fields": [],
@@ -139,9 +171,10 @@ def security_review(_: IssueAgentState) -> dict:
     }
 
 
+@trace_node("draft_review")
 def draft_review(state: IssueAgentState) -> dict:
-    model = get_llm().with_structured_output(ReviewDraft, method="function_calling")
-    result = model.invoke(
+    result = invoke_structured(
+        ReviewDraft,
         [
             (
                 "system",
@@ -156,11 +189,12 @@ def draft_review(state: IssueAgentState) -> dict:
                 f"优先级：{state['priority']}\n标题：{state['title']}\n"
                 f"正文：\n{state['body']}",
             ),
-        ]
+        ],
     )
     return result.model_dump()
 
 
+@trace_node("prepare_actions")
 def prepare_actions(state: IssueAgentState) -> dict:
     actions: list[dict[str, str]] = []
     label = CATEGORY_TO_GITHUB_LABEL.get(state["category"])
@@ -188,7 +222,9 @@ def build_workflow():
 issue_agent_graph = build_workflow()
 
 
-def run_issue_agent(issue: IssueAgentRequest) -> IssueAgentResponse:
-    result = issue_agent_graph.invoke(issue.model_dump())
+def run_issue_agent(
+    issue: IssueAgentRequest, trace: TraceSession | None = None
+) -> IssueAgentResponse:
+    with use_trace(trace):
+        result = issue_agent_graph.invoke(issue.model_dump())
     return IssueAgentResponse.model_validate(result)
-

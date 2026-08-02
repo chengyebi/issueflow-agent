@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from psycopg.rows import dict_row
 
+from app.core.config import get_settings
 from app.db.connection import connect
 from app.models.issues import InternalIssueEvent
 
@@ -11,6 +12,7 @@ class AcceptedIssueDelivery:
     is_new: bool
     issue_event_id: int | None = None
     agent_run_id: int | None = None
+    outbox_event_key: str | None = None
 
 
 def save_issue_event(event: InternalIssueEvent) -> int:
@@ -108,7 +110,17 @@ def accept_issue_delivery(
         run = cur.fetchone()
         if run is None:
             raise RuntimeError("创建 Agent Run 后没有返回 ID")
-        return AcceptedIssueDelivery(True, issue[0], run[0])
+        event_key = f"agent-run:{run[0]}"
+        cur.execute(
+            """
+            INSERT INTO outbox_events (
+                event_key, event_type, aggregate_id, payload, max_attempts
+            ) VALUES (%s, 'agent_run', %s, jsonb_build_object('agent_run_id', %s), %s)
+            ON CONFLICT (event_key) DO NOTHING
+            """,
+            (event_key, run[0], run[0], get_settings().outbox_max_attempts),
+        )
+        return AcceptedIssueDelivery(True, issue[0], run[0], event_key)
 
 
 def save_agent_run_job_id(agent_run_id: int, rq_job_id: str) -> None:
@@ -142,4 +154,3 @@ def list_issue_events(limit: int = 20) -> list[dict]:
             (limit,),
         )
         return list(cur.fetchall())
-

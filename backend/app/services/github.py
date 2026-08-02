@@ -6,6 +6,12 @@ from urllib.request import Request, urlopen
 from app.core.config import get_settings
 
 
+class GitHubRequestError(RuntimeError):
+    def __init__(self, message: str, *, retry_safe: bool):
+        super().__init__(message)
+        self.retry_safe = retry_safe
+
+
 def _issue_path(repo: str, issue_number: int) -> str:
     parts = repo.split("/")
     if len(parts) != 2 or not all(parts):
@@ -44,11 +50,13 @@ def _request(method: str, path: str, payload: dict | None = None):
             return json.loads(body) if body else None
     except HTTPError as exc:
         # Do not propagate response bodies; they can contain user or credential data.
-        raise RuntimeError(
-            f"GitHub API 请求失败: {method} {path}, HTTP {exc.code}"
+        raise GitHubRequestError(
+            f"GitHub API 请求失败: {method} {path}, HTTP {exc.code}",
+            retry_safe=True,
         ) from exc
     except URLError as exc:
-        raise RuntimeError("无法连接 GitHub API") from exc
+        # A lost response can be ambiguous for non-idempotent comment creation.
+        raise GitHubRequestError("无法确认 GitHub API 请求结果", retry_safe=False) from exc
 
 
 def add_issue_label(repo: str, issue_number: int, label: str) -> list:
@@ -71,4 +79,3 @@ def post_issue_comment(repo: str, issue_number: int, body: str) -> dict:
     if not isinstance(result, dict):
         raise RuntimeError("GitHub 创建评论接口返回格式异常")
     return result
-

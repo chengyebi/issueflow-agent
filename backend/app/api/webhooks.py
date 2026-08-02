@@ -10,11 +10,9 @@ from app.models.issues import (
 )
 from app.services.events import (
     accept_issue_delivery,
-    mark_agent_run_failed,
-    save_agent_run_job_id,
     save_webhook_delivery,
 )
-from app.workers.queue import enqueue_issue_agent_run
+from app.services.outbox import dispatch_event
 
 router = APIRouter(tags=["webhooks"])
 SUPPORTED_ACTIONS = {"opened", "edited", "closed", "reopened"}
@@ -79,14 +77,9 @@ async def receive_github_webhook(request: Request):
     if accepted.issue_event_id is None or accepted.agent_run_id is None:
         raise RuntimeError("新的 Webhook 没有生成任务 ID")
 
-    try:
-        rq_job_id = enqueue_issue_agent_run(accepted.agent_run_id)
-        save_agent_run_job_id(accepted.agent_run_id, rq_job_id)
-    except Exception as exc:
-        mark_agent_run_failed(
-            accepted.agent_run_id, f"RQ enqueue failed: {type(exc).__name__}"
-        )
-        raise HTTPException(status_code=503, detail="Agent job enqueue failed") from exc
+    if accepted.outbox_event_key is None:
+        raise RuntimeError("新的 Webhook 没有生成 Outbox 事件")
+    dispatch = dispatch_event(accepted.outbox_event_key)
 
     return {
         "status": "accepted",
@@ -95,6 +88,6 @@ async def receive_github_webhook(request: Request):
         "delivery_id": delivery_id,
         "issue_event_id": accepted.issue_event_id,
         "agent_run_id": accepted.agent_run_id,
-        "rq_job_id": rq_job_id,
+        "rq_job_id": dispatch.rq_job_id,
+        "recovery_pending": dispatch.recovery_pending,
     }
-

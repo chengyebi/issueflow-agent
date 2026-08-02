@@ -29,7 +29,7 @@ def list_review_tasks(status: str | None = None) -> list[dict]:
             cur.execute(
                 """
                 SELECT id, command_type, payload, status, idempotency_key,
-                       error_message
+                       error_type, error_message, retry_safe
                 FROM github_commands WHERE review_task_id = %s ORDER BY id
                 """,
                 (review["review_task_id"],),
@@ -76,5 +76,23 @@ def decide_review_task(
             (decision, review_task_id),
         )
         command_ids = [row["id"] for row in cur.fetchall()]
-    return {"review_task": updated_review, "updated_command_ids": command_ids}
-
+        outbox_event_key = None
+        if decision == "approved" and command_ids:
+            outbox_event_key = f"review-commands:{review_task_id}"
+            cur.execute(
+                """
+                INSERT INTO outbox_events (
+                    event_key, event_type, aggregate_id, payload
+                ) VALUES (
+                    %s, 'review_commands', %s,
+                    jsonb_build_object('review_task_id', %s)
+                )
+                ON CONFLICT (event_key) DO NOTHING
+                """,
+                (outbox_event_key, review_task_id, review_task_id),
+            )
+    return {
+        "review_task": updated_review,
+        "updated_command_ids": command_ids,
+        "outbox_event_key": outbox_event_key,
+    }

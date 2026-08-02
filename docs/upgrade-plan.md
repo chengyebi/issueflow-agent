@@ -24,7 +24,7 @@ React Console -> review / trace / eval / memory APIs
 
 1. 保留 `webhook_deliveries`、`issue_events`、`agent_runs`、`review_tasks`、`github_commands`。
 2. 为 Agent Run 增加 `trace_id`、模型/Prompt/Agent 版本、耗时、Token、重试与错误分类。
-3. 新增节点级 Trace、事务 Outbox 与 Eval Report。
+3. 新增节点级 Trace、事务 Outbox 与 Eval Report。Webhook、Issue Event、Agent Run 与 `agent_run` Outbox 在同一事务提交；审核决定、命令状态与 `review_commands` Outbox 同理。
 4. 后续新增历史 Issue、向量索引、重复判断、仓库记忆和人工反馈表；所有仓库级数据以 `repo` 隔离。
 
 ## 迁移策略
@@ -43,8 +43,8 @@ React Console -> review / trace / eval / memory APIs
 
 - **外部操作重复**：数据库幂等键只能约束本地记录；GitHub 成功但本地状态未更新仍需恢复对账。
 - **队列一致性**：数据库提交后 Redis 投递可能失败，使用事务 Outbox 和可恢复扫描消除任务遗失。
+- **Outbox 取舍**：当前采用“数据库至少一次投递 + 业务幂等键”，而不是跨 PostgreSQL/Redis 的分布式事务。扫描器会恢复未确认投递；GitHub 外部成功但本地更新前崩溃的窗口仍需后续对账，不能宣称严格 exactly-once。
 - **模型不确定性**：结构化 Schema、固定 Prompt 版本、离线标注集、人工审核共同约束。
 - **敏感数据扩散**：Trace 只保存字段摘要和受控输出，不保存签名、Token 或完整原始 Payload。
 - **Embedding 选择**：Provider 抽象化；未经确认不下载大型模型、不假设 Chat API 提供 Embedding、不调用收费服务。
 - **指标误读**：报告同时保存数据集、运行模式、版本和原始逐条结果；示例或 Mock 结果不得宣传为真实模型成绩。
-

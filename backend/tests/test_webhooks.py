@@ -4,6 +4,7 @@ import json
 
 from app.api import webhooks
 from app.services.events import AcceptedIssueDelivery
+from app.services.outbox import DispatchResult
 
 SECRET = "test-webhook-secret"
 
@@ -49,14 +50,14 @@ def test_valid_signature_accepts_and_enqueues(client, monkeypatch):
     monkeypatch.setattr(
         webhooks,
         "accept_issue_delivery",
-        lambda *args: AcceptedIssueDelivery(True, issue_event_id=11, agent_run_id=22),
+        lambda *args: AcceptedIssueDelivery(
+            True, issue_event_id=11, agent_run_id=22, outbox_event_key="agent-run:22"
+        ),
     )
-    monkeypatch.setattr(webhooks, "enqueue_issue_agent_run", lambda run_id: "job-1")
-    saved = {}
     monkeypatch.setattr(
         webhooks,
-        "save_agent_run_job_id",
-        lambda run_id, job_id: saved.update(run_id=run_id, job_id=job_id),
+        "dispatch_event",
+        lambda key: DispatchResult(key, "dispatched", "job-1", False),
     )
 
     response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
@@ -64,7 +65,6 @@ def test_valid_signature_accepts_and_enqueues(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "accepted"
     assert response.json()["rq_job_id"] == "job-1"
-    assert saved == {"run_id": 22, "job_id": "job-1"}
 
 
 def test_duplicate_delivery_does_not_enqueue(client, monkeypatch):
@@ -76,8 +76,8 @@ def test_duplicate_delivery_does_not_enqueue(client, monkeypatch):
     )
     monkeypatch.setattr(
         webhooks,
-        "enqueue_issue_agent_run",
-        lambda *_: (_ for _ in ()).throw(AssertionError("must not enqueue")),
+        "dispatch_event",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not dispatch")),
     )
     response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
     assert response.status_code == 200
@@ -89,34 +89,30 @@ def test_unsupported_action_is_stored_but_not_enqueued(client, monkeypatch):
     monkeypatch.setattr(webhooks, "save_webhook_delivery", lambda *args: True)
     monkeypatch.setattr(
         webhooks,
-        "enqueue_issue_agent_run",
-        lambda *_: (_ for _ in ()).throw(AssertionError("must not enqueue")),
+        "dispatch_event",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not dispatch")),
     )
     response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"
 
 
-def test_enqueue_failure_marks_run_failed(client, monkeypatch):
+def test_enqueue_failure_is_left_for_recovery(client, monkeypatch):
     payload = _payload()
     monkeypatch.setattr(
         webhooks,
         "accept_issue_delivery",
-        lambda *args: AcceptedIssueDelivery(True, issue_event_id=11, agent_run_id=22),
+        lambda *args: AcceptedIssueDelivery(
+            True, issue_event_id=11, agent_run_id=22, outbox_event_key="agent-run:22"
+        ),
     )
     monkeypatch.setattr(
         webhooks,
-        "enqueue_issue_agent_run",
-        lambda *_: (_ for _ in ()).throw(ConnectionError("redis unavailable")),
-    )
-    marked = {}
-    monkeypatch.setattr(
-        webhooks,
-        "mark_agent_run_failed",
-        lambda run_id, message: marked.update(run_id=run_id, message=message),
+        "dispatch_event",
+        lambda key: DispatchResult(key, "pending", None, True),
     )
     response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
-    assert response.status_code == 503
-    assert marked["run_id"] == 22
-    assert "redis unavailable" not in response.text
-
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+    assert response.json()["rq_job_id"] is None
+    assert response.json()["recovery_pending"] is True

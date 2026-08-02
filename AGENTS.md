@@ -13,11 +13,14 @@
 
 ```bash
 python -m pytest backend/tests -q
+RUN_DB_TESTS=1 python -m pytest backend/tests/integration -q
 docker compose build
 docker compose run --rm migrate
 docker compose up -d
 curl --noproxy '*' -fsS http://127.0.0.1:8000/health
 ```
+
+离线 Eval 默认只运行不产生外部费用的启发式基线；使用 `--runner live` 时必须同时显式传入 `--allow-external`，并先获得用户对真实模型调用的确认。Outbox 恢复默认手工触发，避免在未知本地状态下自动产生 LLM 或 GitHub 调用。
 
 ## Git 规则
 
@@ -26,4 +29,3 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/health
 - 使用仓库本地作者：`chengyebi <1283983728@qq.com>`。
 - 提交消息使用中文，按里程碑提交，禁止附加协作者、签署或生成工具标记。
 - 提交前执行相关测试并确认 `git diff --check`。
-
