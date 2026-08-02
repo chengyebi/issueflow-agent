@@ -1,0 +1,4 @@
+{"repo":"example/project","issue_number":10,"title":"登录失败时服务返回 500","body":"输入错误密码后，登录接口崩溃并返回 HTTP 500。","state":"closed"}
+{"repo":"example/project","issue_number":11,"title":"导出 CSV 文件","body":"希望报表页面增加 CSV 下载功能。","state":"closed"}
+{"repo":"example/project","issue_number":12,"title":"README 安装命令错误","body":"文档仍然使用已经删除的 start 参数。","state":"closed"}
+{"repo":"example/other","issue_number":10,"title":"登录失败时服务返回 500","body":"另一个仓库中的相同文本不能被召回。","state":"closed"}

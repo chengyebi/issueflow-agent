@@ -48,7 +48,7 @@ jobs:
       - run: pip install -r backend/requirements-dev.txt
       - run: alembic upgrade head
         working-directory: backend
-      - run: test "$(alembic current 2>/dev/null | awk '{print $1}')" = "0002_trace_eval_outbox"
+      - run: test "$(alembic current 2>/dev/null | awk '{print $1}')" = "0003_historical_issue_rag"
         working-directory: backend
       - run: pytest tests/integration -q
         working-directory: backend

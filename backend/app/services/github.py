@@ -79,3 +79,25 @@ def post_issue_comment(repo: str, issue_number: int, body: str) -> dict:
     if not isinstance(result, dict):
         raise RuntimeError("GitHub 创建评论接口返回格式异常")
     return result
+
+
+def list_repository_issues(
+    repo: str, *, state: str = "all", per_page: int = 100
+):
+    if state not in {"open", "closed", "all"}:
+        raise ValueError("state 必须是 open、closed 或 all")
+    if not 1 <= per_page <= 100:
+        raise ValueError("per_page 必须在 1 到 100 之间")
+    base_path = _issue_path(repo, 1).rsplit("/issues/1", 1)[0]
+    page = 1
+    while True:
+        result = _request(
+            "GET",
+            f"{base_path}/issues?state={state}&per_page={per_page}&page={page}",
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("GitHub Issues 列表接口返回格式异常")
+        yield from result
+        if len(result) < per_page:
+            break
+        page += 1

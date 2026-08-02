@@ -5,6 +5,8 @@ from psycopg.rows import dict_row
 from app.core.config import get_settings
 from app.db.connection import connect
 from app.models.issues import InternalIssueEvent
+from app.rag.repository import upsert_historical_issue
+from app.rag.schema import HistoricalIssue
 
 
 @dataclass(frozen=True)
@@ -13,6 +15,8 @@ class AcceptedIssueDelivery:
     issue_event_id: int | None = None
     agent_run_id: int | None = None
     outbox_event_key: str | None = None
+    historical_issue_id: int | None = None
+    index_outbox_event_key: str | None = None
 
 
 def save_issue_event(event: InternalIssueEvent) -> int:
@@ -103,6 +107,19 @@ def accept_issue_delivery(
         if issue is None:
             raise RuntimeError("插入 Issue 事件后没有返回 ID")
 
+        historical = upsert_historical_issue(
+            cur,
+            HistoricalIssue(
+                repo=event.repo,
+                issue_number=event.issue_number,
+                title=event.issue_title,
+                body=event.issue_body,
+                labels=event.labels,
+                state=event.state,
+                github_updated_at=event.github_updated_at,
+            ),
+        )
+
         cur.execute(
             "INSERT INTO agent_runs (issue_event_id) VALUES (%s) RETURNING id",
             (issue[0],),
@@ -120,7 +137,43 @@ def accept_issue_delivery(
             """,
             (event_key, run[0], run[0], get_settings().outbox_max_attempts),
         )
-        return AcceptedIssueDelivery(True, issue[0], run[0], event_key)
+        index_event_key = None
+        settings = get_settings()
+        if settings.embedding_provider != "disabled" and (
+            historical.embedding_needed
+            or historical.embedding_model != settings.embedding_model
+            or historical.embedding_dimensions != settings.embedding_dimensions
+        ):
+            index_event_key = (
+                f"issue-index:{historical.historical_issue_id}:"
+                f"{historical.content_hash}:{settings.embedding_model}:"
+                f"{settings.embedding_dimensions}"
+            )
+            cur.execute(
+                """
+                INSERT INTO outbox_events (
+                    event_key, event_type, aggregate_id, payload, max_attempts
+                ) VALUES (
+                    %s, 'issue_index', %s,
+                    jsonb_build_object('historical_issue_id', %s), %s
+                )
+                ON CONFLICT (event_key) DO NOTHING
+                """,
+                (
+                    index_event_key,
+                    historical.historical_issue_id,
+                    historical.historical_issue_id,
+                    settings.outbox_max_attempts,
+                ),
+            )
+        return AcceptedIssueDelivery(
+            True,
+            issue[0],
+            run[0],
+            event_key,
+            historical.historical_issue_id,
+            index_event_key,
+        )
 
 
 def save_agent_run_job_id(agent_run_id: int, rq_job_id: str) -> None:

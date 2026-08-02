@@ -73,6 +73,36 @@ def save_completed_run_and_create_review(
 
             review_task_id = row[0]
 
+            duplicate = result.get("duplicate_assessment") or {}
+            if "is_duplicate" in duplicate:
+                cur.execute(
+                    """
+                    INSERT INTO duplicate_assessments (
+                        agent_run_id, repo, issue_number, is_duplicate,
+                        candidate_issue_number, confidence, rationale,
+                        evidence, retrieval_mode
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (agent_run_id) DO UPDATE SET
+                        is_duplicate = EXCLUDED.is_duplicate,
+                        candidate_issue_number = EXCLUDED.candidate_issue_number,
+                        confidence = EXCLUDED.confidence,
+                        rationale = EXCLUDED.rationale,
+                        evidence = EXCLUDED.evidence,
+                        retrieval_mode = EXCLUDED.retrieval_mode
+                    """,
+                    (
+                        agent_run_id,
+                        result["repo"],
+                        result["issue_number"],
+                        duplicate["is_duplicate"],
+                        duplicate.get("candidate_issue_number"),
+                        duplicate.get("confidence", 0.0),
+                        duplicate.get("rationale", ""),
+                        Jsonb(duplicate.get("evidence", [])),
+                        result.get("retrieval_mode", "lexical"),
+                    ),
+                )
+
             for index, action in enumerate(actions):
                 command_type = action["type"]
                 command_value = action["value"]

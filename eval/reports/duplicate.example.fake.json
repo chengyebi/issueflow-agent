@@ -1,0 +1,180 @@
+{
+  "schema_version": "1.0",
+  "eval_id": "b08a2bd6-9b52-4eeb-bff0-1c27dba2eecb",
+  "runner_type": "synthetic_fake_embedding_baseline",
+  "publishable_model_score": false,
+  "dataset_hash": "094c6609392eb137c99d01651a56a8ff235e4b3195eeaf0e9912b66897c9497c",
+  "corpus_hash": "b3e635a85d6936a192b02b89fb77c95dc80c0f6a168ec68638c3db469a3b98f9",
+  "embedding_model": "fake-hash-v1",
+  "embedding_dimensions": 16,
+  "duplicate_threshold": 0.015,
+  "metrics": {
+    "lexical": {
+      "case_count": 3,
+      "relevant_case_count": 2,
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_10": 1.0,
+      "precision_at_1": 1.0,
+      "duplicate_precision": 0.6666666666666666,
+      "duplicate_recall": 1.0,
+      "duplicate_f1": 0.8,
+      "retrieval_p50_ms": 0.07679200007260079,
+      "retrieval_p95_ms": 0.5656035998072184,
+      "degraded_count": 0
+    },
+    "vector": {
+      "case_count": 3,
+      "relevant_case_count": 2,
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "mrr_at_10": 0.5,
+      "precision_at_1": 0.0,
+      "duplicate_precision": 0.6666666666666666,
+      "duplicate_recall": 1.0,
+      "duplicate_f1": 0.8,
+      "retrieval_p50_ms": 0.07912499995654798,
+      "retrieval_p95_ms": 0.08145059991875314,
+      "degraded_count": 0
+    },
+    "hybrid": {
+      "case_count": 3,
+      "relevant_case_count": 2,
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_10": 1.0,
+      "precision_at_1": 1.0,
+      "duplicate_precision": 0.6666666666666666,
+      "duplicate_recall": 1.0,
+      "duplicate_f1": 0.8,
+      "retrieval_p50_ms": 0.0804999999672873,
+      "retrieval_p95_ms": 0.09272470001633337,
+      "degraded_count": 0
+    }
+  },
+  "predictions": {
+    "lexical": [
+      {
+        "case_id": "duplicate-login",
+        "mode": "lexical",
+        "ranked_issue_numbers": [
+          10,
+          11,
+          12
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 10,
+        "latency_ms": 0.6199159997777315,
+        "degraded": false
+      },
+      {
+        "case_id": "duplicate-doc",
+        "mode": "lexical",
+        "ranked_issue_numbers": [
+          12,
+          11,
+          10
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 12,
+        "latency_ms": 0.07679200007260079,
+        "degraded": false
+      },
+      {
+        "case_id": "nonduplicate-theme",
+        "mode": "lexical",
+        "ranked_issue_numbers": [
+          11,
+          12,
+          10
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 11,
+        "latency_ms": 0.040874999740481144,
+        "degraded": false
+      }
+    ],
+    "vector": [
+      {
+        "case_id": "duplicate-login",
+        "mode": "vector",
+        "ranked_issue_numbers": [
+          12,
+          10,
+          11
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 12,
+        "latency_ms": 0.08170899991455371,
+        "degraded": false
+      },
+      {
+        "case_id": "duplicate-doc",
+        "mode": "vector",
+        "ranked_issue_numbers": [
+          10,
+          12,
+          11
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 10,
+        "latency_ms": 0.07912499995654798,
+        "degraded": false
+      },
+      {
+        "case_id": "nonduplicate-theme",
+        "mode": "vector",
+        "ranked_issue_numbers": [
+          11,
+          10,
+          12
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 11,
+        "latency_ms": 0.048458000037499005,
+        "degraded": false
+      }
+    ],
+    "hybrid": [
+      {
+        "case_id": "duplicate-login",
+        "mode": "hybrid",
+        "ranked_issue_numbers": [
+          10,
+          12,
+          11
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 10,
+        "latency_ms": 0.09408300002178294,
+        "degraded": false
+      },
+      {
+        "case_id": "duplicate-doc",
+        "mode": "hybrid",
+        "ranked_issue_numbers": [
+          12,
+          10,
+          11
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 12,
+        "latency_ms": 0.0804999999672873,
+        "degraded": false
+      },
+      {
+        "case_id": "nonduplicate-theme",
+        "mode": "hybrid",
+        "ranked_issue_numbers": [
+          11,
+          10,
+          12
+        ],
+        "predicted_is_duplicate": true,
+        "predicted_candidate_issue_number": 11,
+        "latency_ms": 0.05366700042941375,
+        "degraded": false
+      }
+    ]
+  }
+}

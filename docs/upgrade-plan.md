@@ -25,7 +25,7 @@ React Console -> review / trace / eval / memory APIs
 1. 保留 `webhook_deliveries`、`issue_events`、`agent_runs`、`review_tasks`、`github_commands`。
 2. 为 Agent Run 增加 `trace_id`、模型/Prompt/Agent 版本、耗时、Token、重试与错误分类。
 3. 新增节点级 Trace、事务 Outbox 与 Eval Report。Webhook、Issue Event、Agent Run 与 `agent_run` Outbox 在同一事务提交；审核决定、命令状态与 `review_commands` Outbox 同理。
-4. 后续新增历史 Issue、向量索引、重复判断、仓库记忆和人工反馈表；所有仓库级数据以 `repo` 隔离。
+4. 已新增历史 Issue、向量索引、同步运行和重复判断表；后续新增仓库记忆和人工反馈表。所有仓库级数据以 `repo` 隔离。
 
 ## 迁移策略
 

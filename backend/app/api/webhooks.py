@@ -61,6 +61,16 @@ async def receive_github_webhook(request: Request):
             status_code=422, detail="Invalid GitHub issue event payload"
         ) from exc
 
+    if github_event.issue.pull_request is not None:
+        is_new = save_webhook_delivery(delivery_id, event_name, payload_body)
+        return {
+            "status": "ignored" if is_new else "duplicate",
+            "event": event_name,
+            "action": action_payload.action,
+            "delivery_id": delivery_id,
+            "reason": "pull_request",
+        }
+
     accepted = accept_issue_delivery(
         delivery_id,
         event_name,
@@ -80,6 +90,11 @@ async def receive_github_webhook(request: Request):
     if accepted.outbox_event_key is None:
         raise RuntimeError("新的 Webhook 没有生成 Outbox 事件")
     dispatch = dispatch_event(accepted.outbox_event_key)
+    index_dispatch = (
+        dispatch_event(accepted.index_outbox_event_key)
+        if accepted.index_outbox_event_key
+        else None
+    )
 
     return {
         "status": "accepted",
@@ -90,4 +105,9 @@ async def receive_github_webhook(request: Request):
         "agent_run_id": accepted.agent_run_id,
         "rq_job_id": dispatch.rq_job_id,
         "recovery_pending": dispatch.recovery_pending,
+        "historical_issue_id": accepted.historical_issue_id,
+        "index_rq_job_id": index_dispatch.rq_job_id if index_dispatch else None,
+        "index_recovery_pending": (
+            index_dispatch.recovery_pending if index_dispatch else False
+        ),
     }

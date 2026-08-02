@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     llm_input_cost_per_million_usd: float | None = None
     llm_output_cost_per_million_usd: float | None = None
 
+    embedding_provider: str = "disabled"
+    embedding_model: str = "fake-hash-v1"
+    embedding_dimensions: int = 16
+    duplicate_top_k: int = 5
+    duplicate_rrf_k: int = 60
+    duplicate_min_score: float = 0.0
+    duplicate_reranker_enabled: bool = False
+
     @property
     def retry_intervals(self) -> list[int]:
         return [

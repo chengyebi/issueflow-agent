@@ -1,0 +1,3 @@
+{"id":"duplicate-login","query":{"repo":"example/project","issue_number":101,"title":"错误密码导致登录接口 500","body":"用户输错密码后服务崩溃。"},"expected":{"relevant_issue_numbers":[10],"is_duplicate":true},"source":"synthetic_example"}
+{"id":"duplicate-doc","query":{"repo":"example/project","issue_number":102,"title":"安装文档的启动命令不可用","body":"README 里的 start 参数已经不存在。"},"expected":{"relevant_issue_numbers":[12],"is_duplicate":true},"source":"synthetic_example"}
+{"id":"nonduplicate-theme","query":{"repo":"example/project","issue_number":103,"title":"支持深色主题","body":"设置页跟随系统主题。"},"expected":{"relevant_issue_numbers":[],"is_duplicate":false},"source":"synthetic_example"}

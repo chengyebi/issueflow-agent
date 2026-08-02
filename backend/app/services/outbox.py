@@ -56,6 +56,10 @@ def dispatch_event(event_key: str) -> DispatchResult:
             rq_job_id = enqueue_issue_agent_run(event["aggregate_id"])
         elif event["event_type"] == "review_commands":
             rq_job_id = enqueue_review_commands(event["aggregate_id"])
+        elif event["event_type"] == "issue_index":
+            from app.workers.queue import enqueue_issue_embedding
+
+            rq_job_id = enqueue_issue_embedding(event["aggregate_id"])
         else:
             raise ValueError(f"不支持的 Outbox 事件类型: {event['event_type']}")
     except Exception as exc:

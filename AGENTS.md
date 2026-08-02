@@ -22,6 +22,8 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/health
 
 离线 Eval 默认只运行不产生外部费用的启发式基线；使用 `--runner live` 时必须同时显式传入 `--allow-external`，并先获得用户对真实模型调用的确认。Outbox 恢复默认手工触发，避免在未知本地状态下自动产生 LLM 或 GitHub 调用。
 
+历史 Issue Backfill 默认禁止网络访问，必须显式传入 `--allow-github-network`。默认 `EMBEDDING_PROVIDER=disabled`；`fake` 只用于测试，未经确认不得选择收费 Provider、配置真实 Key 或下载大型模型。查重只形成审核建议，禁止自动关闭 Issue。
+
 ## Git 规则
 
 - 只在 `feat/issueflow-v2` 开发，不切换到 `main`。

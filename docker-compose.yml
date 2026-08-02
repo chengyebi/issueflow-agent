@@ -25,6 +25,9 @@ services:
       - AGENT_VERSION=${AGENT_VERSION:-workflow-v2}
       - LLM_INPUT_COST_PER_MILLION_USD=${LLM_INPUT_COST_PER_MILLION_USD:-}
       - LLM_OUTPUT_COST_PER_MILLION_USD=${LLM_OUTPUT_COST_PER_MILLION_USD:-}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-disabled}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-fake-hash-v1}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-16}
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -53,6 +56,9 @@ services:
       - RQ_RETRY_INTERVALS=${RQ_RETRY_INTERVALS:-10,30}
       - LLM_INPUT_COST_PER_MILLION_USD=${LLM_INPUT_COST_PER_MILLION_USD:-}
       - LLM_OUTPUT_COST_PER_MILLION_USD=${LLM_OUTPUT_COST_PER_MILLION_USD:-}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-disabled}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-fake-hash-v1}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-16}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
     depends_on:
       migrate:

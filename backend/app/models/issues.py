@@ -1,6 +1,7 @@
+from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 SupportedAction = Literal["opened", "edited", "closed", "reopened"]
 
@@ -21,6 +22,10 @@ class GitHubIssuePayload(BaseModel):
     number: int
     title: str
     body: str | None = None
+    labels: list[dict] = Field(default_factory=list)
+    state: Literal["open", "closed"] = "open"
+    updated_at: datetime | None = None
+    pull_request: dict | None = None
 
 
 class GitHubIssueActionPayload(BaseModel):
@@ -41,6 +46,9 @@ class InternalIssueEvent(BaseModel):
     issue_number: int
     issue_title: str
     issue_body: str
+    labels: list[str] = Field(default_factory=list)
+    state: Literal["open", "closed"] = "open"
+    github_updated_at: datetime
 
 
 def normalize_github_issue_event(event: GitHubIssueEvent) -> InternalIssueEvent:
@@ -52,5 +60,11 @@ def normalize_github_issue_event(event: GitHubIssueEvent) -> InternalIssueEvent:
         issue_number=event.issue.number,
         issue_title=event.issue.title,
         issue_body=event.issue.body or "",
+        labels=[
+            item.get("name", "")
+            for item in event.issue.labels
+            if isinstance(item, dict) and item.get("name")
+        ],
+        state=event.issue.state,
+        github_updated_at=event.issue.updated_at or datetime.now(timezone.utc),
     )
-

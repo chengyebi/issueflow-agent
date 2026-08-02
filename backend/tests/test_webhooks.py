@@ -97,6 +97,30 @@ def test_unsupported_action_is_stored_but_not_enqueued(client, monkeypatch):
     assert response.json()["status"] == "ignored"
 
 
+def test_pull_request_is_not_indexed_or_analyzed(client, monkeypatch):
+    payload = json.dumps(
+        {
+            "action": "opened",
+            "repository": {"full_name": "owner/repo"},
+            "issue": {
+                "number": 8,
+                "title": "PR title",
+                "body": "PR body",
+                "pull_request": {"url": "https://api.github.test/pulls/8"},
+            },
+        }
+    ).encode()
+    monkeypatch.setattr(webhooks, "save_webhook_delivery", lambda *args: True)
+    monkeypatch.setattr(
+        webhooks,
+        "accept_issue_delivery",
+        lambda *_: (_ for _ in ()).throw(AssertionError("PR must not be indexed")),
+    )
+    response = client.post("/webhooks/github", content=payload, headers=_headers(payload))
+    assert response.status_code == 200
+    assert response.json()["reason"] == "pull_request"
+
+
 def test_enqueue_failure_is_left_for_recovery(client, monkeypatch):
     payload = _payload()
     monkeypatch.setattr(
