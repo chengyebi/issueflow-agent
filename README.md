@@ -518,7 +518,7 @@ erDiagram
 
     AGENT_RUNS {
         int id PK
-        int issue_event_id FK_UK
+        int issue_event_id UK
         string status
         string rq_job_id
         jsonb result_json
