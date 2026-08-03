@@ -23,7 +23,9 @@ class FakeRepository:
         self.vector = [_hit(2, 20, 0.95), _hit(3, 30, 0.7)]
         self.calls = []
 
-    def lexical_search(self, repo, query, limit, exclude_issue_number=None):
+    def lexical_search(
+        self, repo, query, limit, exclude_issue_number=None, created_before=None
+    ):
         self.calls.append(("lexical", repo, exclude_issue_number))
         return self.lexical[:limit]
 
@@ -35,6 +37,9 @@ class FakeRepository:
         dimensions,
         limit,
         exclude_issue_number=None,
+        created_before=None,
+        *,
+        exact=False,
     ):
         self.calls.append(("vector", repo, exclude_issue_number))
         return self.vector[:limit]
@@ -43,9 +48,13 @@ class FakeRepository:
 class FailingProvider:
     model_name = "failure"
     dimensions = 8
+    last_observations = []
 
     def embed(self, texts):
         raise RuntimeError("embedding unavailable")
+
+    def embed_query(self, texts):
+        return self.embed(texts)
 
 
 def test_rrf_score_and_shared_candidate_ranking():

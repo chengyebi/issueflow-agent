@@ -17,9 +17,11 @@ GitHub Backfill / Issue Webhook
 
 ## 数据与索引
 
-`historical_issues` 以 `(repo, issue_number)` 唯一隔离仓库，保存标题、正文、标签、状态、GitHub 更新时间、内容哈希和索引时间。标题或正文未变化时不会重复生成 Embedding；标签和状态更新不会使向量失效。
+`historical_issues` 以 `(repo, issue_number)` 唯一隔离仓库，保存标题、正文、标签、状态、GitHub 创建/更新时间、内容哈希和索引时间。正式检索输入仅包含标题和正文；标签只用于展示，避免把维护者事后添加的 duplicate 标签泄漏给查询。标题/正文内容哈希未变化时不会重复生成向量或 Chunk。
 
-Lexical baseline 使用 PostgreSQL 全文检索与 `pg_trgm`。Vector 检索使用 pgvector cosine distance；迁移为默认 16 维测试配置建立表达式 HNSW 索引。切换真实 Provider 和维度前，需要为目标维度新增迁移和索引，不能直接假设现有索引适用。
+`historical_issue_chunks` 保存真实 tokenizer 切分的 384 维向量。默认每段 384 tokens、重叠 64、最多 16 段，且每段重复标题；父 Issue 记录原始、保存和截断 token 数以及完整版本键。详见 [长文本策略](rag-long-document-strategy.md)。
+
+Lexical baseline 使用 PostgreSQL 全文检索与 `pg_trgm`。Vector 检索使用 pgvector cosine distance；迁移分别保留 16 维 Fake 测试索引并新增 384 维 BGE HNSW 索引。
 
 Hybrid 模式通过 Reciprocal Rank Fusion 合并两路结果：
 
@@ -33,11 +35,26 @@ RRF score = sum(1 / (rrf_k + rank))
 
 Provider 由 `EmbeddingProvider` 协议隔离，模型名和维度来自配置：
 
-- `disabled`：默认值，不产生网络请求或费用；
+- `fastembed`：Docker CPU 内运行 `BAAI/bge-small-en-v1.5`，不把 Issue 内容发送到外部服务；
+- `disabled`：禁用向量检索，不产生模型下载；
 - `fake`：只用于确定性测试和合成评测；
-- 其他值：明确失败，等待人工选择和实现真实 Provider。
+- 其他值：明确失败，不会静默切换到云端服务。
 
-系统不假设聊天模型 API 支持 Embedding，也不会自行下载大型模型或选择收费服务。
+模型缓存位于持久化 Volume `fastembed_cache`，容器路径为 `/var/cache/issueflow/fastembed`。首次启动允许下载；缓存完成后设置 `EMBEDDING_LOCAL_FILES_ONLY=true` 可禁止联网加载。启动探针会实际生成向量并校验 384 维，不一致时终止启动，禁止写入数据库。
+
+### 确定性文本表示
+
+1. 使用 Unicode NFKC；统一换行并压缩行内空白；
+2. 空正文显式写为 `[empty]`；
+3. 标签不进入检索文本；
+4. 固定字段顺序为 `Title`、`Body`；
+5. 表示版本记录为 `issue-title-body-v2`。
+
+该模型最大输入为 512 tokens。FastEmbed 会在 512 tokens 处截断；系统在推理前用同一 tokenizer 统计未截断 token 数，并把原始 token 数、实际输入 token 数、最大值和 `embedding_truncated` 写入数据库。查询响应也返回截断观测，避免静默丢失信息。
+
+Issue-to-Issue 相似度默认不添加 Query Prefix。开发集同时比较无 Prefix 与 `Represent this sentence for searching relevant passages: `；结果冻结后才运行测试集，不用 test 反向选参数。
+
+所有离线评测还传入 `query_created_at`，SQL 强制候选同仓库、不是 Query 自身且创建时间更早。数据泄漏与 Cluster split 规则见 [评测方法](rag-evaluation-methodology.md) 和 [泄漏边界](rag-data-leakage.md)。
 
 ## Backfill 与增量同步
 
@@ -48,7 +65,7 @@ cd backend
 python -m app.rag.backfill --repo owner/repo --allow-github-network
 ```
 
-只有在已确认 Provider 后才能附加 `--embed`。同步运行及计数写入 `issue_sync_runs`，单条失败不会删除既有索引。
+附加 `--embed` 后使用已配置的本地 Provider。`--max-issues` 是强制数量上限；同步运行及计数写入 `issue_sync_runs`，单条失败不会删除既有索引。
 
 ## 查询 API
 

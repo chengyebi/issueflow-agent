@@ -30,6 +30,9 @@ def github_issue_to_historical(repo: str, payload: dict) -> HistoricalIssue:
         body=payload.get("body") or "",
         labels=_label_names(payload.get("labels", [])),
         state=payload.get("state", "open"),
+        github_created_at=datetime.fromisoformat(
+            payload["created_at"].replace("Z", "+00:00")
+        ),
         github_updated_at=datetime.fromisoformat(
             payload["updated_at"].replace("Z", "+00:00")
         ),
@@ -42,7 +45,10 @@ def sync_repository_issues(
     fetcher: Callable[..., Iterable[dict]] = list_repository_issues,
     repository: PostgresHistoricalIssueRepository | None = None,
     embedding_provider: EmbeddingProvider | None = None,
+    max_issues: int = 500,
 ) -> dict:
+    if not 1 <= max_issues <= 5000:
+        raise ValueError("单次 Backfill 的 Issue 上限必须在 1 到 5000 之间")
     repository = repository or PostgresHistoricalIssueRepository()
     with connect(row_factory=dict_row) as conn, conn.cursor() as cur:
         cur.execute(
@@ -60,6 +66,9 @@ def sync_repository_issues(
     }
     try:
         for payload in fetcher(repo, state="all", per_page=100):
+            indexed_count = counters["upserted_count"] + counters["unchanged_count"]
+            if indexed_count >= max_issues or counters["scanned_count"] >= min(5000, max_issues * 3):
+                break
             counters["scanned_count"] += 1
             if payload.get("pull_request") is not None:
                 counters["skipped_pull_request_count"] += 1

@@ -144,10 +144,13 @@ def process_issue_agent_run(agent_run_id: int) -> dict:
                     ie.repo,
                     ie.issue_number,
                     ie.issue_title,
-                    ie.issue_body
+                    ie.issue_body,
+                    COALESCE(hi.labels, '[]'::jsonb) AS labels
                 FROM agent_runs ar
                 JOIN issue_events ie
                     ON ie.id = ar.issue_event_id
+                LEFT JOIN historical_issues hi
+                    ON hi.repo = ie.repo AND hi.issue_number = ie.issue_number
                 WHERE ar.id = %s;
                 """,
                 (agent_run_id,),
@@ -192,6 +195,7 @@ def process_issue_agent_run(agent_run_id: int) -> dict:
         issue_number=row["issue_number"],
         title=row["issue_title"],
         body=row["issue_body"] or "",
+        labels=list(row["labels"] or []),
     )
 
     trace = TraceSession(

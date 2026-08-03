@@ -24,6 +24,7 @@ class GitHubIssuePayload(BaseModel):
     body: str | None = None
     labels: list[dict] = Field(default_factory=list)
     state: Literal["open", "closed"] = "open"
+    created_at: datetime | None = None
     updated_at: datetime | None = None
     pull_request: dict | None = None
 
@@ -48,6 +49,7 @@ class InternalIssueEvent(BaseModel):
     issue_body: str
     labels: list[str] = Field(default_factory=list)
     state: Literal["open", "closed"] = "open"
+    github_created_at: datetime
     github_updated_at: datetime
 
 
@@ -66,5 +68,8 @@ def normalize_github_issue_event(event: GitHubIssueEvent) -> InternalIssueEvent:
             if isinstance(item, dict) and item.get("name")
         ],
         state=event.issue.state,
+        github_created_at=(
+            event.issue.created_at or event.issue.updated_at or datetime.now(timezone.utc)
+        ),
         github_updated_at=event.issue.updated_at or datetime.now(timezone.utc),
     )
