@@ -8,3 +8,5 @@ alembic>=1.14,<2
 pydantic-settings>=2.7,<3
 langgraph>=0.4,<2
 langchain-openai>=0.3,<2
+fastembed==0.7.4
+requests>=2.31,<3

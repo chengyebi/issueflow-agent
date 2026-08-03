@@ -25,9 +25,22 @@ services:
       - AGENT_VERSION=${AGENT_VERSION:-workflow-v2}
       - LLM_INPUT_COST_PER_MILLION_USD=${LLM_INPUT_COST_PER_MILLION_USD:-}
       - LLM_OUTPUT_COST_PER_MILLION_USD=${LLM_OUTPUT_COST_PER_MILLION_USD:-}
-      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-disabled}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-fake-hash-v1}
-      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-16}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-fastembed}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-384}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-16}
+      - EMBEDDING_QUERY_PREFIX=${EMBEDDING_QUERY_PREFIX:-}
+      - EMBEDDING_CACHE_DIR=/var/cache/issueflow/fastembed
+      - EMBEDDING_LOCAL_FILES_ONLY=${EMBEDDING_LOCAL_FILES_ONLY:-false}
+      - EMBEDDING_CHUNK_SIZE=${EMBEDDING_CHUNK_SIZE:-384}
+      - EMBEDDING_CHUNK_OVERLAP=${EMBEDDING_CHUNK_OVERLAP:-64}
+      - EMBEDDING_MAX_CHUNKS=${EMBEDDING_MAX_CHUNKS:-16}
+      - EVAL_REPOS=${EVAL_REPOS:-microsoft/vscode,nodejs/node,rust-lang/rust}
+      - EVAL_CORPUS_LIMIT_PER_REPO=${EVAL_CORPUS_LIMIT_PER_REPO:-2000}
+      - EVAL_QUERY_LIMIT_PER_REPO=${EVAL_QUERY_LIMIT_PER_REPO:-50}
+
+    volumes:
+      - fastembed_cache:/var/cache/issueflow/fastembed
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -56,10 +69,23 @@ services:
       - RQ_RETRY_INTERVALS=${RQ_RETRY_INTERVALS:-10,30}
       - LLM_INPUT_COST_PER_MILLION_USD=${LLM_INPUT_COST_PER_MILLION_USD:-}
       - LLM_OUTPUT_COST_PER_MILLION_USD=${LLM_OUTPUT_COST_PER_MILLION_USD:-}
-      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-disabled}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-fake-hash-v1}
-      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-16}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-fastembed}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-384}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_WRITE_ENABLED=${GITHUB_WRITE_ENABLED:-false}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-16}
+      - EMBEDDING_QUERY_PREFIX=${EMBEDDING_QUERY_PREFIX:-}
+      - EMBEDDING_CACHE_DIR=/var/cache/issueflow/fastembed
+      - EMBEDDING_LOCAL_FILES_ONLY=${EMBEDDING_LOCAL_FILES_ONLY:-false}
+      - EMBEDDING_CHUNK_SIZE=${EMBEDDING_CHUNK_SIZE:-384}
+      - EMBEDDING_CHUNK_OVERLAP=${EMBEDDING_CHUNK_OVERLAP:-64}
+      - EMBEDDING_MAX_CHUNKS=${EMBEDDING_MAX_CHUNKS:-16}
+      - EVAL_REPOS=${EVAL_REPOS:-microsoft/vscode,nodejs/node,rust-lang/rust}
+      - EVAL_CORPUS_LIMIT_PER_REPO=${EVAL_CORPUS_LIMIT_PER_REPO:-2000}
+      - EVAL_QUERY_LIMIT_PER_REPO=${EVAL_QUERY_LIMIT_PER_REPO:-50}
+    volumes:
+      - fastembed_cache:/var/cache/issueflow/fastembed
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -94,3 +120,4 @@ services:
       retries: 10
 volumes:
   postgres_data:
+  fastembed_cache:

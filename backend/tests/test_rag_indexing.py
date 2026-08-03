@@ -12,13 +12,14 @@ class Repository:
             "embedding_content_hash": "a" * 64 if embedded else None,
             "embedding_model": "fake-hash-v1" if embedded else None,
             "embedding_dimensions": 8 if embedded else None,
+            "embedding_text_version": "issue-title-body-v2" if embedded else None,
         }
         self.saved = []
 
     def get_for_embedding(self, issue_id):
         return self.issue
 
-    def save_embedding(self, *args):
+    def save_embedding(self, *args, **kwargs):
         self.saved.append(args)
         return True
 

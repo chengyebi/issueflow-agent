@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.api.agent import router as agent_router
@@ -9,10 +11,17 @@ from app.api.rag import router as rag_router
 from app.api.recovery import router as recovery_router
 from app.api.reviews import router as reviews_router
 from app.api.webhooks import router as webhooks_router
+from app.rag.startup import validate_embedding_runtime
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    validate_embedding_runtime()
+    yield
 
 
 def create_app() -> FastAPI:
-    application = FastAPI(title="IssueFlow Agent")
+    application = FastAPI(title="IssueFlow Agent", lifespan=lifespan)
     application.include_router(health_router)
     application.include_router(issues_router)
     application.include_router(webhooks_router)

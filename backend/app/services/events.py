@@ -7,6 +7,7 @@ from app.db.connection import connect
 from app.models.issues import InternalIssueEvent
 from app.rag.repository import upsert_historical_issue
 from app.rag.schema import HistoricalIssue
+from app.rag.text import ISSUE_EMBEDDING_TEXT_VERSION
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ def accept_issue_delivery(
                 body=event.issue_body,
                 labels=event.labels,
                 state=event.state,
+                github_created_at=event.github_created_at,
                 github_updated_at=event.github_updated_at,
             ),
         )
@@ -143,11 +145,13 @@ def accept_issue_delivery(
             historical.embedding_needed
             or historical.embedding_model != settings.embedding_model
             or historical.embedding_dimensions != settings.embedding_dimensions
+            or historical.embedding_text_version != ISSUE_EMBEDDING_TEXT_VERSION
         ):
             index_event_key = (
                 f"issue-index:{historical.historical_issue_id}:"
                 f"{historical.content_hash}:{settings.embedding_model}:"
                 f"{settings.embedding_dimensions}"
+                f":{ISSUE_EMBEDDING_TEXT_VERSION}"
             )
             cur.execute(
                 """

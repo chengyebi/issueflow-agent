@@ -22,7 +22,14 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/health
 
 离线 Eval 默认只运行不产生外部费用的启发式基线；使用 `--runner live` 时必须同时显式传入 `--allow-external`，并先获得用户对真实模型调用的确认。Outbox 恢复默认手工触发，避免在未知本地状态下自动产生 LLM 或 GitHub 调用。
 
-历史 Issue Backfill 默认禁止网络访问，必须显式传入 `--allow-github-network`。默认 `EMBEDDING_PROVIDER=disabled`；`fake` 只用于测试，未经确认不得选择收费 Provider、配置真实 Key 或下载大型模型。查重只形成审核建议，禁止自动关闭 Issue。
+历史 Issue Backfill 默认禁止网络访问，必须显式传入 `--allow-github-network` 并设置数量上限。已批准的本地方案仅限 FastEmbed `BAAI/bge-small-en-v1.5`；`fake` 只用于普通测试。不得调用云端 Embedding、下载大型模型或 Reranker。查重只形成审核建议，禁止自动关闭 Issue。
+
+真实本地模型测试必须显式设置 `RUN_LOCAL_EMBEDDING_TESTS=1`；普通 `pytest` 不得触发模型下载。当前 GitHub 写操作保持禁用，公开仓库采集只能使用 GET 请求。
+
+查重正式评测顺序固定为：维护者证据采集与时间对齐语料 → 生成 head/Chunk 向量 →
+只在 dev 选择 Prefix 与 Chunk 聚合 → 冻结配置 → 运行 test 一次。测试查询只可使用
+`title`/`body`，候选必须同仓库且 `created_at < query_created_at`。不得用 test 调参，也不得把
+hard-negative 候选包装成绝对 Ground Truth。
 
 ## Git 规则
 

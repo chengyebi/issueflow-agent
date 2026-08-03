@@ -1,5 +1,18 @@
 # 历史 Issue 查重标注指南
 
+## 数据层级
+
+- `maintainer-grounded positives`：当前有效的 `marked_as_duplicate` 事件，或
+  `MEMBER`、`OWNER`、`COLLABORATOR` 明确写出的 `Duplicate of #N`。正式检索指标只使用这一层。
+- `easy negatives`：明显不相似的简单负样本，只报告误报率，不代表困难场景。
+- `qualitative hard-negative stress set`：主题相近的压力样本，允许
+  `duplicate`、`non_duplicate`、`uncertain`，无维护者证据时不作为绝对真值。
+- `uncertain samples`：证据不足或冲突的审计样本，不进入正式指标。
+
+现有 `duplicate_candidates.csv/jsonl` 中的 30 条显式关系属于 dev/smoke 数据，
+可调试 Chunk、Prefix 和 RRF，但不是未见测试集。CSV 中已有人工标注保留；不再要求把
+60 条全部人工填完，也不再使用本地网页标注脚本。
+
 ## 标注单位
 
 每条样本包含目标 Issue、同仓库候选 Issue、是否重复的人工标签，以及重复时的标准 Issue 编号。跨仓库内容不作为重复候选。
@@ -15,8 +28,8 @@
 
 ## 评测口径
 
-- 检索：Recall@1、Recall@5、MRR@10、Precision@1；
-- 判断：duplicate Precision、Recall、F1；
+- 检索：Recall@1/5/10、MRR@10、nDCG@10；
+- 当前不发布完整 duplicate classification F1；困难负样本只做定性压力分析；
 - 性能：每种检索模式的 P50/P95；
 - 对照：lexical、vector、hybrid RRF，以及明确启用后的可选 reranker。
 

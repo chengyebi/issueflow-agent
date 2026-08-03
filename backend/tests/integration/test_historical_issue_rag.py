@@ -4,9 +4,10 @@ from uuid import uuid4
 
 import pytest
 
+from app.core.config import Settings
 from app.db.connection import connect
 from app.rag.embedding import FakeEmbeddingProvider
-from app.rag.indexing import embed_historical_issue
+from app.rag.indexing import embed_historical_issue, embed_historical_issue_chunks
 from app.rag.repository import PostgresHistoricalIssueRepository
 from app.rag.retrieval import HybridRetriever
 from app.rag.schema import HistoricalIssue
@@ -25,6 +26,7 @@ def _issue(repo: str, number: int, title: str, body: str) -> HistoricalIssue:
         body=body,
         labels=["bug"],
         state="closed",
+        github_created_at=datetime.now(timezone.utc),
         github_updated_at=datetime.now(timezone.utc),
     )
 
@@ -109,6 +111,7 @@ def test_backfill_skips_pull_requests_and_does_not_reembed_unchanged_content():
             "body": "add CSV download",
             "labels": [{"name": "enhancement"}],
             "state": "open",
+            "created_at": "2026-07-01T00:00:00Z",
             "updated_at": "2026-08-01T00:00:00Z",
         },
         {
@@ -116,6 +119,7 @@ def test_backfill_skips_pull_requests_and_does_not_reembed_unchanged_content():
             "title": "PR",
             "body": "code change",
             "state": "open",
+            "created_at": "2026-07-01T00:00:00Z",
             "updated_at": "2026-08-01T00:00:00Z",
             "pull_request": {"url": "https://api.github.test/pulls/2"},
         },
@@ -140,5 +144,66 @@ def test_backfill_skips_pull_requests_and_does_not_reembed_unchanged_content():
         with connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT issue_number FROM historical_issues WHERE repo = %s", (repo_name,))
             assert [row[0] for row in cur.fetchall()] == [1]
+    finally:
+        _cleanup(repo_name)
+
+
+def test_chunk_search_respects_query_time_and_is_idempotent():
+    repo_name = f"integration/chunk-time-{uuid4()}"
+    repository = PostgresHistoricalIssueRepository()
+    provider = FakeEmbeddingProvider(dimensions=384)
+    settings = Settings(
+        embedding_provider="fake",
+        embedding_model=provider.model_name,
+        embedding_dimension=384,
+        embedding_chunk_size=48,
+        embedding_chunk_overlap=8,
+        embedding_max_chunks=4,
+    )
+    older_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    future_time = datetime(2027, 1, 1, tzinfo=timezone.utc)
+    try:
+        older = _issue(repo_name, 1, "Terminal loses focus", "focus changes after command")
+        newer = _issue(repo_name, 2, "Terminal loses focus", "same symptom in future")
+        older.github_created_at = older_time
+        newer.github_created_at = future_time
+        first = repository.upsert(older)
+        second = repository.upsert(newer)
+        for stored in (first, second):
+            embed_historical_issue_chunks(
+                stored.historical_issue_id,
+                repository=repository,
+                provider=provider,
+                settings=settings,
+            )
+        calls_after_first_index = provider.call_count
+        unchanged = embed_historical_issue_chunks(
+            first.historical_issue_id,
+            repository=repository,
+            provider=provider,
+            settings=settings,
+        )
+        assert unchanged["status"] == "unchanged"
+        assert provider.call_count == calls_after_first_index
+
+        query_vector = provider.embed_query(["Title: Terminal loses focus\nBody:\nfocus"])
+        exact = repository.chunk_vector_search(
+            repo_name,
+            query_vector,
+            provider.model_name,
+            10,
+            created_before=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            exact=True,
+        )
+        hnsw = repository.chunk_vector_search(
+            repo_name,
+            query_vector,
+            provider.model_name,
+            10,
+            created_before=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            exact=False,
+        )
+        assert [hit.issue_number for hit in exact] == [1]
+        assert [hit.issue_number for hit in hnsw] == [1]
     finally:
         _cleanup(repo_name)

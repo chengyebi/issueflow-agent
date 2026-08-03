@@ -11,6 +11,7 @@ class HistoricalIssue(BaseModel):
     body: str = ""
     labels: list[str] = Field(default_factory=list)
     state: Literal["open", "closed"]
+    github_created_at: datetime
     github_updated_at: datetime
 
 
@@ -22,6 +23,8 @@ class SearchHit(BaseModel):
     body: str
     state: str
     score: float
+    github_created_at: datetime | None = None
+    best_chunk_index: int | None = None
 
 
 class SimilarIssueCandidate(BaseModel):
@@ -43,4 +46,10 @@ class RetrievalResult(BaseModel):
     mode: Literal["lexical", "vector", "hybrid"]
     degraded: bool = False
     degradation_reason: str | None = None
+    embedding_model: str | None = None
+    query_original_tokens: int | None = None
+    query_embedded_tokens: int | None = None
+    query_truncated: bool | None = None
+    query_chunk_count: int | None = None
+    query_truncated_tokens: int | None = None
     candidates: list[SimilarIssueCandidate]

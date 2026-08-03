@@ -28,6 +28,7 @@ class IssueAgentRequest(BaseModel):
     issue_number: int
     title: str
     body: str
+    labels: list[str] = Field(default_factory=list)
 
 
 class TriageResult(BaseModel):
@@ -100,6 +101,7 @@ class IssueAgentState(TypedDict, total=False):
     issue_number: int
     title: str
     body: str
+    labels: list[str]
     category: Category
     priority: Priority
     risk_level: RiskLevel
