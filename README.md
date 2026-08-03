@@ -530,7 +530,7 @@ erDiagram
 
     REVIEW_TASKS {
         int id PK
-        int agent_run_id FK_UK
+        int agent_run_id FK, UK
         string status
         string reviewer
         text review_note
