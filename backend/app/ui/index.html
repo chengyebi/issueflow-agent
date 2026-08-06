@@ -25,9 +25,9 @@
         <nav class="topbar-actions" aria-label="辅助链接">
           <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
           <a href="/health" target="_blank" rel="noreferrer">Health</a>
-          <span class="system-status">
+          <span id="system-status" class="system-status">
             <span class="status-dot" aria-hidden="true"></span>
-            UI ready
+            <span id="system-status-label">正在连接</span>
           </span>
         </nav>
       </header>
@@ -85,35 +85,54 @@
               </div>
 
               <div class="filter-tabs" aria-label="任务状态筛选">
-                <button class="filter-tab is-active" type="button" data-status="pending">
+                <button
+                  class="filter-tab is-active"
+                  type="button"
+                  data-status="pending"
+                  aria-pressed="true"
+                >
                   待审核
                 </button>
-                <button class="filter-tab" type="button" data-status="approved">
+                <button
+                  class="filter-tab"
+                  type="button"
+                  data-status="approved"
+                  aria-pressed="false"
+                >
                   已批准
                 </button>
-                <button class="filter-tab" type="button" data-status="rejected">
+                <button
+                  class="filter-tab"
+                  type="button"
+                  data-status="rejected"
+                  aria-pressed="false"
+                >
                   已拒绝
                 </button>
               </div>
             </div>
 
-            <div id="review-list" class="review-list">
-              <div class="empty-state compact">
-                <div class="empty-icon" aria-hidden="true">◎</div>
-                <h3>审核队列尚未连接</h3>
-                <p>本批次只建立 UI 骨架，下一批将读取真实 review tasks。</p>
+            <div
+              id="review-list"
+              class="review-list"
+              aria-live="polite"
+              aria-busy="true"
+            >
+              <div class="loading-state">
+                <span class="loading-spinner" aria-hidden="true"></span>
+                <p>正在读取审核任务……</p>
               </div>
             </div>
           </aside>
 
-          <section class="detail-panel">
+          <section id="detail-panel" class="detail-panel" aria-live="polite">
             <div class="empty-state">
               <div class="empty-icon large" aria-hidden="true">◇</div>
               <p class="panel-kicker">Review details</p>
               <h2>选择一条任务查看 Agent 提议</h2>
               <p>
-                后续这里会展示原始 Issue、风险等级、分类结果、重复判断、
-                相似 Issue、标签草案、评论草案和执行状态。
+                这里会展示原始 Issue、风险等级、分类结果、重复判断、
+                相似 Issue、标签草案、评论草案和命令状态。
               </p>
 
               <div class="flow-preview" aria-label="工作流预览">
@@ -128,6 +147,14 @@
             </div>
           </section>
         </section>
+
+        <div
+          id="notification"
+          class="notification"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
       </main>
 
       <footer class="footer">
