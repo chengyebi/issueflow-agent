@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="IssueFlow Agent human-in-the-loop review console"
+    />
+    <title>IssueFlow Review Console</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="/ui/" aria-label="IssueFlow Review Console 首页">
+          <span class="brand-mark" aria-hidden="true">IF</span>
+          <span>
+            <strong>IssueFlow</strong>
+            <small>Review Console</small>
+          </span>
+        </a>
+
+        <nav class="topbar-actions" aria-label="辅助链接">
+          <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+          <a href="/health" target="_blank" rel="noreferrer">Health</a>
+          <span class="system-status">
+            <span class="status-dot" aria-hidden="true"></span>
+            UI ready
+          </span>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="page-title">
+          <div>
+            <p class="eyebrow">Human-in-the-loop operations</p>
+            <h1 id="page-title">审核 Agent 提议，再安全写回 GitHub</h1>
+            <p class="hero-description">
+              在一个界面中查看 Issue 上下文、模型判断、相似 Issue 和待执行命令。
+              所有外部写操作都必须经过维护者批准。
+            </p>
+          </div>
+
+          <div class="hero-actions">
+            <button id="refresh-button" class="primary-button" type="button">
+              刷新状态
+            </button>
+            <p id="last-updated" class="last-updated" aria-live="polite">
+              尚未刷新
+            </p>
+          </div>
+        </section>
+
+        <section class="metrics-grid" aria-label="审核任务统计">
+          <article class="metric-card">
+            <span>待审核</span>
+            <strong id="pending-count">—</strong>
+            <small>Pending reviews</small>
+          </article>
+          <article class="metric-card">
+            <span>已批准</span>
+            <strong id="approved-count">—</strong>
+            <small>Approved reviews</small>
+          </article>
+          <article class="metric-card">
+            <span>已拒绝</span>
+            <strong id="rejected-count">—</strong>
+            <small>Rejected reviews</small>
+          </article>
+          <article class="metric-card">
+            <span>执行失败</span>
+            <strong id="failed-count">—</strong>
+            <small>Failed commands</small>
+          </article>
+        </section>
+
+        <section class="workspace" aria-label="审核工作区">
+          <aside class="queue-panel">
+            <div class="panel-header">
+              <div>
+                <p class="panel-kicker">Review queue</p>
+                <h2>审核任务</h2>
+              </div>
+
+              <div class="filter-tabs" aria-label="任务状态筛选">
+                <button class="filter-tab is-active" type="button" data-status="pending">
+                  待审核
+                </button>
+                <button class="filter-tab" type="button" data-status="approved">
+                  已批准
+                </button>
+                <button class="filter-tab" type="button" data-status="rejected">
+                  已拒绝
+                </button>
+              </div>
+            </div>
+
+            <div id="review-list" class="review-list">
+              <div class="empty-state compact">
+                <div class="empty-icon" aria-hidden="true">◎</div>
+                <h3>审核队列尚未连接</h3>
+                <p>本批次只建立 UI 骨架，下一批将读取真实 review tasks。</p>
+              </div>
+            </div>
+          </aside>
+
+          <section class="detail-panel">
+            <div class="empty-state">
+              <div class="empty-icon large" aria-hidden="true">◇</div>
+              <p class="panel-kicker">Review details</p>
+              <h2>选择一条任务查看 Agent 提议</h2>
+              <p>
+                后续这里会展示原始 Issue、风险等级、分类结果、重复判断、
+                相似 Issue、标签草案、评论草案和执行状态。
+              </p>
+
+              <div class="flow-preview" aria-label="工作流预览">
+                <span>Issue</span>
+                <b aria-hidden="true">→</b>
+                <span>Agent draft</span>
+                <b aria-hidden="true">→</b>
+                <span>Human review</span>
+                <b aria-hidden="true">→</b>
+                <span>GitHub command</span>
+              </div>
+            </div>
+          </section>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>IssueFlow Agent</span>
+        <span>模型负责建议 · 程序负责约束 · 人工负责批准</span>
+      </footer>
+    </div>
+  </body>
+</html>
