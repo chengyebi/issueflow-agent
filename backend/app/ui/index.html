@@ -3,6 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'"
+    />
     <meta
       name="description"
       content="IssueFlow Agent human-in-the-loop review console"
@@ -25,6 +30,14 @@
         <nav class="topbar-actions" aria-label="辅助链接">
           <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
           <a href="/health" target="_blank" rel="noreferrer">Health</a>
+          <button
+            id="lock-button"
+            class="lock-button"
+            type="button"
+            hidden
+          >
+            锁定审核台
+          </button>
           <span id="system-status" class="system-status">
             <span class="status-dot" aria-hidden="true"></span>
             <span id="system-status-label">正在连接</span>
@@ -162,5 +175,65 @@
         <span>模型负责建议 · 程序负责约束 · 人工负责批准</span>
       </footer>
     </div>
+
+    <dialog
+      id="unlock-dialog"
+      class="unlock-dialog"
+      aria-labelledby="unlock-title"
+      aria-describedby="unlock-description"
+    >
+      <form id="unlock-form" class="unlock-form">
+        <div class="unlock-mark" aria-hidden="true">IF</div>
+
+        <div>
+          <p class="panel-kicker">Protected review console</p>
+          <h2 id="unlock-title">解锁 IssueFlow 审核台</h2>
+          <p id="unlock-description" class="unlock-description">
+            审核任务包含 Issue 内容、Agent 判断和待执行命令。
+            请输入管理员 Token 后才能读取或提交审核决策。
+          </p>
+        </div>
+
+        <div class="unlock-field">
+          <label for="review-admin-token">管理员 Token</label>
+          <input
+            id="review-admin-token"
+            class="unlock-input"
+            name="review_admin_token"
+            type="password"
+            required
+            maxlength="1024"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            placeholder="输入 REVIEW_ADMIN_TOKEN"
+          />
+          <small>
+            Token 不会进入 URL，只用于同源审核 API 请求。
+          </small>
+        </div>
+
+        <p
+          id="unlock-error"
+          class="unlock-error"
+          role="alert"
+          aria-live="assertive"
+          hidden
+        ></p>
+
+        <button
+          id="unlock-button"
+          class="unlock-button"
+          type="submit"
+        >
+          解锁审核台
+        </button>
+
+        <p class="unlock-storage-note">
+          解锁后 Token 仅保存在当前浏览器页面会话中。
+          你可以随时点击“锁定审核台”立即清除。
+        </p>
+      </form>
+    </dialog>
   </body>
 </html>

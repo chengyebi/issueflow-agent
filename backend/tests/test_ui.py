@@ -12,6 +12,13 @@ def test_review_ui_index_is_served(client):
     assert 'id="review-list"' in response.text
     assert 'id="detail-panel"' in response.text
     assert 'id="system-status-label"' in response.text
+    assert 'id="unlock-dialog"' in response.text
+    assert 'id="unlock-form"' in response.text
+    assert 'id="review-admin-token"' in response.text
+    assert 'type="password"' in response.text
+    assert 'id="lock-button"' in response.text
+    assert "Content-Security-Policy" in response.text
+    assert 'name="referrer" content="no-referrer"' in response.text
 
 
 def test_review_ui_static_assets_are_served(client):
@@ -26,6 +33,10 @@ def test_review_ui_static_assets_are_served(client):
     assert ".review-decision-form" in css_response.text
     assert ".decision-button-approve" in css_response.text
     assert ".notification.is-success" in css_response.text
+    assert ".unlock-dialog" in css_response.text
+    assert ".unlock-dialog::backdrop" in css_response.text
+    assert ".unlock-input" in css_response.text
+    assert ".lock-button" in css_response.text
 
     assert js_response.status_code == 200
     assert "javascript" in js_response.headers["content-type"]
@@ -55,6 +66,21 @@ def test_review_ui_uses_safe_rendering_and_explicit_decisions(client):
     assert 'parts[0].toLowerCase() === "local"' in javascript
     assert "!Number.isInteger(number)" in javascript
     assert "number <= 0" in javascript
+    assert 'const REVIEW_ADMIN_HEADER_NAME = "X-Review-Admin-Token"' in javascript
+    assert "window.sessionStorage" in javascript
+    assert "localStorage" not in javascript
+    assert "REVIEW_ADMIN_TOKEN_STORAGE_KEY" in javascript
+    assert "unlockDialog.showModal()" in javascript
+    assert "unlockDialog.addEventListener(\"cancel\"" in javascript
+    assert "unlockForm.addEventListener(\"submit\"" in javascript
+    assert "lockReviewConsole" in javascript
+    assert "clearReviewAdminToken" in javascript
+    assert "ReviewAuthenticationError" in javascript
+    assert "ReviewAuthenticationConfigurationError" in javascript
+    assert "[REVIEW_ADMIN_HEADER_NAME]" in javascript
+    assert "console.log" not in javascript
+    assert "eval(" not in javascript
+    assert "new Function" not in javascript
 
 
 def test_review_ui_mount_does_not_shadow_existing_api(client):
@@ -192,3 +218,32 @@ def test_review_decision_validation_contract_for_ui(client):
 
     assert missing_reviewer.status_code == 422
     assert oversized_note.status_code == 422
+
+
+def test_review_ui_csp_restricts_scripts_and_connections(client):
+    response = client.get("/ui/")
+    html = response.text
+
+    assert "default-src 'self'" in html
+    assert "script-src 'self'" in html
+    assert "style-src 'self'" in html
+    assert "connect-src 'self'" in html
+    assert "object-src 'none'" in html
+    assert "base-uri 'none'" in html
+    assert "form-action 'self'" in html
+    assert "<script>" not in html
+    assert "onclick=" not in html
+
+
+def test_review_ui_does_not_place_admin_token_in_url_or_body(client):
+    response = client.get("/ui/app.js")
+    javascript = response.text
+
+    assert "REVIEW_ADMIN_HEADER_NAME" in javascript
+    assert "review_admin_token" not in javascript
+    assert "URLSearchParams" not in javascript
+    assert "location.search" not in javascript
+    assert "location.hash" not in javascript
+    assert "token=" not in javascript
+    assert "JSON.stringify({\n      reviewer," in javascript
+    assert "review_note: reviewNote || null" in javascript

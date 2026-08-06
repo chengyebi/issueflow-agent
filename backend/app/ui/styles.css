@@ -1023,3 +1023,166 @@ a {
     width: 100%;
   }
 }
+
+.lock-button {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 9px;
+  padding: 7px 10px;
+  background: rgba(30, 41, 59, 0.46);
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.lock-button:hover {
+  border-color: rgba(125, 211, 252, 0.34);
+  background: rgba(30, 64, 175, 0.16);
+  color: #ffffff;
+}
+
+.locked-state .empty-icon {
+  border-color: rgba(148, 163, 184, 0.2);
+  background: rgba(51, 65, 85, 0.2);
+  color: #94a3b8;
+}
+
+.unlock-dialog {
+  width: min(500px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 22px;
+  padding: 0;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(37, 99, 235, 0.2), transparent 22rem),
+    #0b1525;
+  box-shadow: 0 32px 100px rgba(0, 0, 0, 0.58);
+  color: #f8fafc;
+}
+
+.unlock-dialog::backdrop {
+  background: rgba(3, 8, 18, 0.82);
+  backdrop-filter: blur(8px);
+}
+
+.unlock-form {
+  display: grid;
+  gap: 20px;
+  padding: 30px;
+}
+
+.unlock-mark {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border: 1px solid rgba(129, 140, 248, 0.5);
+  border-radius: 16px;
+  background: linear-gradient(145deg, #1d4ed8, #4f46e5);
+  box-shadow: 0 14px 40px rgba(37, 99, 235, 0.28);
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.unlock-form h2 {
+  margin: 0;
+  font-size: 25px;
+  letter-spacing: -0.025em;
+}
+
+.unlock-description {
+  margin: 10px 0 0;
+  color: #9eafc8;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.unlock-field {
+  display: grid;
+  gap: 8px;
+}
+
+.unlock-field label {
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.unlock-input {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid rgba(148, 163, 184, 0.23);
+  border-radius: 11px;
+  outline: none;
+  padding: 0 13px;
+  background: rgba(8, 16, 29, 0.8);
+  color: #f8fafc;
+  font: inherit;
+  font-size: 13px;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background 150ms ease;
+}
+
+.unlock-input:focus {
+  border-color: rgba(96, 165, 250, 0.7);
+  background: rgba(15, 26, 43, 0.94);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.unlock-input:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.unlock-field small,
+.unlock-storage-note {
+  color: #71829c;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.unlock-error {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid rgba(248, 113, 113, 0.27);
+  border-radius: 10px;
+  background: rgba(127, 29, 29, 0.16);
+  color: #fecaca;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.unlock-button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 11px;
+  background: #dbeafe;
+  color: #172554;
+  font-weight: 800;
+}
+
+.unlock-button:hover:not(:disabled) {
+  background: #bfdbfe;
+}
+
+.unlock-button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.unlock-storage-note {
+  margin: -6px 0 0;
+  text-align: center;
+}
+
+@media (max-width: 520px) {
+  .unlock-form {
+    padding: 24px 20px;
+  }
+
+  .topbar-actions {
+    align-items: flex-start;
+  }
+}

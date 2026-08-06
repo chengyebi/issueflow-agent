@@ -1,6 +1,14 @@
 "use strict";
 
+const REVIEW_ADMIN_HEADER_NAME = "X-Review-Admin-Token";
+const REVIEW_ADMIN_TOKEN_STORAGE_KEY = "issueflow.reviewAdminToken";
 const REVIEW_STATUSES = ["pending", "approved", "rejected"];
+
+
+class ReviewAuthenticationError extends Error {}
+
+
+class ReviewAuthenticationConfigurationError extends Error {}
 
 const STATUS_LABELS = {
   pending: "待审核",
@@ -43,6 +51,8 @@ const state = {
   selectedReviewTaskId: null,
   loading: false,
   deciding: false,
+  authenticating: false,
+  reviewAdminToken: "",
 };
 
 const refreshButton = document.querySelector("#refresh-button");
@@ -53,6 +63,12 @@ const detailPanel = document.querySelector("#detail-panel");
 const systemStatus = document.querySelector("#system-status");
 const systemStatusLabel = document.querySelector("#system-status-label");
 const notification = document.querySelector("#notification");
+const lockButton = document.querySelector("#lock-button");
+const unlockDialog = document.querySelector("#unlock-dialog");
+const unlockForm = document.querySelector("#unlock-form");
+const unlockTokenInput = document.querySelector("#review-admin-token");
+const unlockButton = document.querySelector("#unlock-button");
+const unlockError = document.querySelector("#unlock-error");
 
 const metricElements = {
   pending: document.querySelector("#pending-count"),
@@ -149,6 +165,149 @@ function hideNotification() {
   notification.hidden = true;
   notification.textContent = "";
   notification.className = "notification";
+}
+
+function readStoredReviewAdminToken() {
+  try {
+    return window.sessionStorage.getItem(REVIEW_ADMIN_TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+
+function storeReviewAdminToken(token) {
+  state.reviewAdminToken = token;
+
+  try {
+    window.sessionStorage.setItem(REVIEW_ADMIN_TOKEN_STORAGE_KEY, token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
+function clearReviewAdminToken() {
+  state.reviewAdminToken = "";
+
+  try {
+    window.sessionStorage.removeItem(REVIEW_ADMIN_TOKEN_STORAGE_KEY);
+  } catch {
+    // 当前页面的内存 Token 已经清除；存储不可用时不扩大错误。
+  }
+}
+
+
+function getReviewAdminToken() {
+  if (state.reviewAdminToken) {
+    return state.reviewAdminToken;
+  }
+
+  const storedToken = readStoredReviewAdminToken();
+
+  if (storedToken) {
+    state.reviewAdminToken = storedToken;
+  }
+
+  return storedToken;
+}
+
+
+function resetReviewState() {
+  REVIEW_STATUSES.forEach((status) => {
+    state.reviewsByStatus[status] = [];
+  });
+
+  state.activeStatus = "pending";
+  state.selectedReviewTaskId = null;
+
+  metricElements.pending.textContent = "—";
+  metricElements.approved.textContent = "—";
+  metricElements.rejected.textContent = "—";
+  metricElements.failed.textContent = "—";
+
+  updateActiveTab();
+  renderDetailEmpty(
+    "审核台已锁定",
+    "输入管理员 Token 后才能查看 Issue、Agent 判断和待执行命令。",
+  );
+
+  reviewList.setAttribute("aria-busy", "false");
+  reviewList.replaceChildren();
+
+  const locked = createElement("div", {
+    className: "empty-state compact locked-state",
+  });
+  locked.append(
+    createElement("div", {
+      className: "empty-icon",
+      text: "◇",
+    }),
+    createElement("h3", {
+      text: "审核数据已锁定",
+    }),
+    createElement("p", {
+      text: "请先完成管理员身份验证。",
+    }),
+  );
+
+  reviewList.append(locked);
+}
+
+
+function setUnlockError(message = "") {
+  unlockError.textContent = message;
+  unlockError.hidden = !message;
+}
+
+
+function showUnlockDialog(message = "") {
+  setUnlockError(message);
+  lockButton.hidden = true;
+  setSystemState(
+    message ? "需要重新解锁" : "审核台已锁定",
+    message ? "error" : "ready",
+  );
+
+  if (!unlockDialog.open) {
+    unlockDialog.showModal();
+  }
+
+  window.setTimeout(() => {
+    unlockTokenInput.focus();
+  }, 0);
+}
+
+
+function closeUnlockDialog() {
+  setUnlockError("");
+  unlockTokenInput.value = "";
+
+  if (unlockDialog.open) {
+    unlockDialog.close();
+  }
+
+  lockButton.hidden = false;
+}
+
+
+function lockReviewConsole(message = "") {
+  clearReviewAdminToken();
+  resetReviewState();
+  hideNotification();
+  showUnlockDialog(message);
+}
+
+
+function reviewRequestHeaders(extraHeaders = {}) {
+  const token = getReviewAdminToken();
+
+  return {
+    Accept: "application/json",
+    ...(token ? { [REVIEW_ADMIN_HEADER_NAME]: token } : {}),
+    ...extraHeaders,
+  };
 }
 
 function extractApiErrorDetail(body) {
@@ -253,33 +412,52 @@ function createEmptyBlock(message) {
   });
 }
 
-async function requestReviewTasks(status) {
+async function requestReviewTasks(status, tokenOverride = null) {
+  const headers =
+    tokenOverride === null
+      ? reviewRequestHeaders()
+      : {
+          Accept: "application/json",
+          [REVIEW_ADMIN_HEADER_NAME]: tokenOverride,
+        };
+
   const response = await fetch(
     `/review-tasks?status=${encodeURIComponent(status)}`,
     {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-      },
+      headers,
       cache: "no-store",
     },
   );
 
+  let data = null;
+
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+
   if (!response.ok) {
-    let detail = "";
-    try {
-      const body = await response.json();
-      detail = body.detail ? `：${body.detail}` : "";
-    } catch {
-      detail = "";
+    const detail = extractApiErrorDetail(data);
+    const suffix = detail ? `：${detail}` : "";
+
+    if (response.status === 401) {
+      throw new ReviewAuthenticationError(
+        `管理员 Token 无效或已失效${suffix}`,
+      );
+    }
+
+    if (response.status === 503) {
+      throw new ReviewAuthenticationConfigurationError(
+        `服务端尚未配置审核管理员 Token${suffix}`,
+      );
     }
 
     throw new Error(
-      `读取${statusLabel(status)}任务失败（HTTP ${response.status}）${detail}`,
+      `读取${statusLabel(status)}任务失败（HTTP ${response.status}）${suffix}`,
     );
   }
-
-  const data = await response.json();
 
   if (!data || !Array.isArray(data.items)) {
     throw new Error(`读取${statusLabel(status)}任务失败：响应格式不正确`);
@@ -310,10 +488,9 @@ async function requestReviewDecision(
 
   const response = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      Accept: "application/json",
+    headers: reviewRequestHeaders({
       "Content-Type": "application/json",
-    },
+    }),
     body: JSON.stringify({
       reviewer,
       review_note: reviewNote || null,
@@ -331,6 +508,18 @@ async function requestReviewDecision(
   if (!response.ok) {
     const detail = extractApiErrorDetail(data);
     const suffix = detail ? `：${detail}` : "";
+
+    if (response.status === 401) {
+      throw new ReviewAuthenticationError(
+        `管理员 Token 无效或已失效${suffix}`,
+      );
+    }
+
+    if (response.status === 503) {
+      throw new ReviewAuthenticationConfigurationError(
+        `服务端尚未配置审核管理员 Token${suffix}`,
+      );
+    }
 
     throw new Error(
       `提交${statusLabel(decision)}决策失败（HTTP ${response.status}）${suffix}`,
@@ -817,6 +1006,14 @@ async function handleReviewDecision(
     const message =
       error instanceof Error ? error.message : "提交审核决策时发生未知错误";
 
+    if (
+      error instanceof ReviewAuthenticationError ||
+      error instanceof ReviewAuthenticationConfigurationError
+    ) {
+      lockReviewConsole(message);
+      return;
+    }
+
     showNotification(message, "error");
     setSystemState("操作失败", "error");
   } finally {
@@ -1151,6 +1348,12 @@ function selectFirstActiveReview() {
 }
 
 async function loadReviews() {
+  if (!getReviewAdminToken()) {
+    resetReviewState();
+    showUnlockDialog();
+    return false;
+  }
+
   if (state.loading) {
     return false;
   }
@@ -1187,14 +1390,21 @@ async function loadReviews() {
     const message =
       error instanceof Error ? error.message : "读取审核任务时发生未知错误";
 
+    if (
+      error instanceof ReviewAuthenticationError ||
+      error instanceof ReviewAuthenticationConfigurationError
+    ) {
+      lockReviewConsole(message);
+      return false;
+    }
+
     renderListError(message);
     renderDetailEmpty(
       "审核数据暂时不可用",
       "请检查后端、PostgreSQL 和接口状态，然后重新刷新。",
     );
-    showNotification(message);
+    showNotification(message, "error");
     setSystemState("连接失败", "error");
-
     return false;
   } finally {
     state.loading = false;
@@ -1202,6 +1412,96 @@ async function loadReviews() {
     refreshButton.textContent = "刷新状态";
   }
 }
+
+function setUnlockFormBusy(busy) {
+  state.authenticating = busy;
+  unlockTokenInput.disabled = busy;
+  unlockButton.disabled = busy;
+  unlockButton.textContent = busy ? "正在验证…" : "解锁审核台";
+}
+
+
+async function unlockReviewConsole(token) {
+  if (state.authenticating) {
+    return;
+  }
+
+  const candidateToken = token.trim();
+
+  if (!candidateToken) {
+    unlockTokenInput.setCustomValidity("请输入管理员 Token");
+    unlockTokenInput.reportValidity();
+    unlockTokenInput.focus();
+    return;
+  }
+
+  unlockTokenInput.setCustomValidity("");
+  setUnlockError("");
+  setUnlockFormBusy(true);
+  setSystemState("正在验证", "loading");
+
+  try {
+    await requestReviewTasks("pending", candidateToken);
+
+    const persisted = storeReviewAdminToken(candidateToken);
+    closeUnlockDialog();
+
+    const loaded = await loadReviews();
+
+    if (!loaded) {
+      return;
+    }
+
+    showNotification(
+      persisted
+        ? "审核台已解锁。"
+        : "审核台已解锁，但浏览器会话存储不可用；刷新页面后需要重新输入 Token。",
+      persisted ? "success" : "warning",
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "验证管理员 Token 时发生未知错误";
+
+    clearReviewAdminToken();
+    resetReviewState();
+    setUnlockError(message);
+    setSystemState(
+      error instanceof ReviewAuthenticationConfigurationError
+        ? "服务未配置"
+        : "解锁失败",
+      "error",
+    );
+
+    if (!unlockDialog.open) {
+      unlockDialog.showModal();
+    }
+
+    unlockTokenInput.select();
+  } finally {
+    setUnlockFormBusy(false);
+  }
+}
+
+
+unlockDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+});
+
+
+unlockForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  unlockReviewConsole(unlockTokenInput.value);
+});
+
+
+lockButton.addEventListener("click", () => {
+  if (!window.confirm("确认锁定审核台并清除当前页面会话中的管理员 Token？")) {
+    return;
+  }
+
+  lockReviewConsole();
+});
+
 
 refreshButton.addEventListener("click", loadReviews);
 
@@ -1223,4 +1523,14 @@ filterTabs.forEach((tab) => {
 });
 
 updateActiveTab();
-loadReviews();
+resetReviewState();
+
+const initialReviewAdminToken = readStoredReviewAdminToken();
+
+if (initialReviewAdminToken) {
+  state.reviewAdminToken = initialReviewAdminToken;
+  lockButton.hidden = false;
+  loadReviews();
+} else {
+  showUnlockDialog();
+}

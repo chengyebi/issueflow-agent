@@ -1,11 +1,15 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.review_auth import require_review_admin
 from app.models.reviews import ReviewDecisionRequest
 from app.services.exceptions import ConflictError, NotFoundError
 from app.services.outbox import dispatch_event
 from app.services.reviews import decide_review_task, list_review_tasks
 
-router = APIRouter(tags=["reviews"])
+router = APIRouter(
+    tags=["reviews"],
+    dependencies=[Depends(require_review_admin)],
+)
 ALLOWED_STATUSES = {"pending", "approved", "rejected"}
 
 
@@ -33,10 +37,12 @@ def approve_review_task(review_task_id: int, request: ReviewDecisionRequest):
     result = _decide(review_task_id, "approved", request)
     rq_job_id = None
     recovery_pending = False
+
     if result["updated_command_ids"]:
         dispatch = dispatch_event(result["outbox_event_key"])
         rq_job_id = dispatch.rq_job_id
         recovery_pending = dispatch.recovery_pending
+
     return {
         **result,
         "rq_job_id": rq_job_id,
