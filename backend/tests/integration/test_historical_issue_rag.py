@@ -148,6 +148,54 @@ def test_backfill_skips_pull_requests_and_does_not_reembed_unchanged_content():
         _cleanup(repo_name)
 
 
+def _pathological_long_query() -> str:
+    # A run of '-' (the exclusion operator) inside the first LEXICAL_TSQUERY_MAX_CHARS
+    # chars plus a trailing flood of dashes makes websearch_to_tsquery blow its parser
+    # stack ("tsquery stack too small") unless the input is bounded and dash runs are
+    # collapsed. Probe sits inside the bounded prefix so recall of head content is kept.
+    phrase = (
+        "when building the target triple the linker fails to resolve the codegen "
+        "configuration for the selected backend and aborts with an internal compiler error "
+    )
+    probe = "Z9Q7K2lexicalboundprobe"
+    dash_run = "|" + "-" * 35 + "|"
+    head = (
+        f"({phrase.strip()}) " * 6 + " " + probe + " " + dash_run + " "
+        + f"({phrase.strip()}) " * 12
+    )[:2500]
+    assert probe in head and head.find(probe) < 2000
+    assert head.find(dash_run) < 2000
+    tail = " ".join("--- stderr " + "-" * 70 for _ in range(320))
+    return head + tail
+
+
+def test_lexical_search_survives_pathological_long_query():
+    repo_name = f"integration/lexical-long-{uuid4()}"
+    repository = PostgresHistoricalIssueRepository()
+    phrase = (
+        "when building the target triple the linker fails to resolve the codegen "
+        "configuration for the selected backend and aborts with an internal compiler error "
+    )
+    probe = "Z9Q7K2lexicalboundprobe"
+    try:
+        # body contains every head word so the (ANDed) bounded tsquery still matches
+        repository.upsert(
+            _issue(
+                repo_name,
+                1,
+                probe,
+                phrase.strip() + " " + probe,
+            )
+        )
+        long_query = _pathological_long_query()
+        assert len(long_query) > 15000
+        hits = repository.lexical_search(repo_name, long_query, 10)
+        assert hits, "long query must still return candidates"
+        assert {hit.issue_number for hit in hits} == {1}
+    finally:
+        _cleanup(repo_name)
+
+
 def test_chunk_search_respects_query_time_and_is_idempotent():
     repo_name = f"integration/chunk-time-{uuid4()}"
     repository = PostgresHistoricalIssueRepository()
