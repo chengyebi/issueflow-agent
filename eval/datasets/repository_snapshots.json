@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0",
+  "snapshot_time": "2026-08-06T16:02:38.922884+00:00",
+  "retrieval_input_fields": [
+    "title",
+    "body"
+  ],
+  "repos": {
+    "microsoft/vscode": {
+      "requested_corpus_limit": 2000,
+      "corpus_cutoff_before": "2026-02-08T03:19:15+00:00",
+      "time_aligned_corpus_fetched": 2000,
+      "same_day_boundary_policy": "exclude boundary day between search windows",
+      "ground_truth_issue_cache_count": 125,
+      "valid_edge_count": 51,
+      "excluded_edge_count": 15,
+      "sync": {
+        "sync_run_id": 33,
+        "repo": "microsoft/vscode",
+        "scanned_count": 2000,
+        "upserted_count": 1999,
+        "unchanged_count": 1,
+        "embedded_count": 0,
+        "skipped_pull_request_count": 0
+      },
+      "ground_truth_sync": {
+        "sync_run_id": 32,
+        "repo": "microsoft/vscode",
+        "scanned_count": 125,
+        "upserted_count": 119,
+        "unchanged_count": 6,
+        "embedded_count": 0,
+        "skipped_pull_request_count": 0
+      },
+      "stored_issue_count": 2236,
+      "earliest_created_at": "2016-09-08T21:12:16+00:00",
+      "latest_created_at": "2026-08-03T15:02:18+00:00"
+    },
+    "nodejs/node": {
+      "requested_corpus_limit": 2000,
+      "corpus_cutoff_before": "2019-04-25T07:31:20+00:00",
+      "time_aligned_corpus_fetched": 2000,
+      "same_day_boundary_policy": "exclude boundary day between search windows",
+      "ground_truth_issue_cache_count": 125,
+      "valid_edge_count": 60,
+      "excluded_edge_count": 7,
+      "sync": {
+        "sync_run_id": 35,
+        "repo": "nodejs/node",
+        "scanned_count": 2000,
+        "upserted_count": 1998,
+        "unchanged_count": 2,
+        "embedded_count": 0,
+        "skipped_pull_request_count": 0
+      },
+      "ground_truth_sync": {
+        "sync_run_id": 34,
+        "repo": "nodejs/node",
+        "scanned_count": 125,
+        "upserted_count": 119,
+        "unchanged_count": 4,
+        "embedded_count": 0,
+        "skipped_pull_request_count": 2
+      },
+      "stored_issue_count": 2126,
+      "earliest_created_at": "2014-12-18T04:35:58+00:00",
+      "latest_created_at": "2026-08-03T05:31:48+00:00"
+    },
+    "rust-lang/rust": {
+      "requested_corpus_limit": 2000,
+      "corpus_cutoff_before": "2023-07-25T13:03:11+00:00",
+      "time_aligned_corpus_fetched": 2000,
+      "same_day_boundary_policy": "exclude boundary day between search windows",
+      "ground_truth_issue_cache_count": 117,
+      "valid_edge_count": 55,
+      "excluded_edge_count": 5,
+      "sync": {
+        "sync_run_id": 37,
+        "repo": "rust-lang/rust",
+        "scanned_count": 2000,
+        "upserted_count": 1998,
+        "unchanged_count": 2,
+        "embedded_count": 0,
+        "skipped_pull_request_count": 0
+      },
+      "ground_truth_sync": {
+        "sync_run_id": 36,
+        "repo": "rust-lang/rust",
+        "scanned_count": 117,
+        "upserted_count": 113,
+        "unchanged_count": 4,
+        "embedded_count": 0,
+        "skipped_pull_request_count": 0
+      },
+      "stored_issue_count": 2123,
+      "earliest_created_at": "2015-05-28T17:37:18+00:00",
+      "latest_created_at": "2026-08-03T15:02:22+00:00"
+    }
+  }
+}
