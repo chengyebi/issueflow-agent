@@ -1,0 +1,40 @@
+{
+  "selected": {
+    "prefix_name": "bge_retrieval",
+    "query_prefix": "Represent this sentence for searching relevant passages: ",
+    "chunk_aggregation": "max_chunk_score",
+    "selection_metric": "macro_ndcg_at_10",
+    "selection_score": 0.5311541158099536
+  },
+  "trials": [
+    {
+      "prefix_name": "no_prefix",
+      "query_prefix": "",
+      "chunk_aggregation": "max_chunk_score",
+      "selection_metric": "macro_ndcg_at_10",
+      "selection_score": 0.5217420872841665
+    },
+    {
+      "prefix_name": "no_prefix",
+      "query_prefix": "",
+      "chunk_aggregation": "mean_top2_chunk_score",
+      "selection_metric": "macro_ndcg_at_10",
+      "selection_score": 0.49605971405028654
+    },
+    {
+      "prefix_name": "bge_retrieval",
+      "query_prefix": "Represent this sentence for searching relevant passages: ",
+      "chunk_aggregation": "max_chunk_score",
+      "selection_metric": "macro_ndcg_at_10",
+      "selection_score": 0.5311541158099536
+    },
+    {
+      "prefix_name": "bge_retrieval",
+      "query_prefix": "Represent this sentence for searching relevant passages: ",
+      "chunk_aggregation": "mean_top2_chunk_score",
+      "selection_metric": "macro_ndcg_at_10",
+      "selection_score": 0.5079062293520238
+    }
+  ],
+  "test_observed": false
+}
