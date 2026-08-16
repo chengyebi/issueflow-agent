@@ -5,3 +5,6 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+
+# 运行时诊断输出（RAG 诊断脚本生成，非版本化产物）
+eval/reports/diagnostics/

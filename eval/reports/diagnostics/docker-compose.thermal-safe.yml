@@ -1,5 +1,0 @@
-services:
-  backend:
-    cpus: 0.50
-  postgres:
-    cpus: 0.50
