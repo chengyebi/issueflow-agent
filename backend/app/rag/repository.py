@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -9,6 +10,13 @@ from app.db.connection import connect
 from app.rag.embedding import EmbeddingObservation
 from app.rag.schema import HistoricalIssue, SearchHit
 from app.rag.text import ISSUE_EMBEDDING_TEXT_VERSION, issue_content_hash
+
+# Pathological issue text (markdown table separators, code blocks with long runs of
+# '-', or simply very long bodies) can make websearch_to_tsquery blow its internal
+# parser stack ("tsquery stack too small"). The tsquery input is bounded and runs of
+# the '-' exclusion operator are collapsed; similarity()/%% still score the full query.
+LEXICAL_TSQUERY_MAX_CHARS = 2000
+LEXICAL_TSQUERY_DASH_RUN = re.compile(r"-{2,}")
 
 
 @dataclass(frozen=True)
@@ -235,6 +243,9 @@ class PostgresHistoricalIssueRepository:
         exclude_issue_number: int | None = None,
         created_before: datetime | None = None,
     ) -> list[SearchHit]:
+        tsquery_input = LEXICAL_TSQUERY_DASH_RUN.sub(
+            " ", query[:LEXICAL_TSQUERY_MAX_CHARS]
+        )
         with connect(row_factory=dict_row) as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -259,7 +270,7 @@ class PostgresHistoricalIssueRepository:
                 (
                     query,
                     query,
-                    query,
+                    tsquery_input,
                     repo,
                     exclude_issue_number,
                     exclude_issue_number,
@@ -267,7 +278,7 @@ class PostgresHistoricalIssueRepository:
                     created_before,
                     query,
                     query,
-                    query,
+                    tsquery_input,
                     limit,
                 ),
             )

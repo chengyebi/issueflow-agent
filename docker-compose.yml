@@ -16,6 +16,7 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/issueflow
       - REDIS_URL=redis://redis:6379/0
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - REVIEW_ADMIN_TOKEN=${REVIEW_ADMIN_TOKEN:-}
 
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}

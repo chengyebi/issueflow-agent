@@ -1,716 +1,377 @@
 # IssueFlow Agent
 
+[![CI](https://github.com/chengyebi/issueflow-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/chengyebi/issueflow-agent/actions/workflows/ci.yml)
+
 面向 GitHub 仓库维护场景的 Issue 智能分诊与人工审核系统。
 
-IssueFlow 通过 GitHub Webhook 接收 Issue 事件，使用 LangGraph 编排大模型分析流程，生成分类、风险判断、复现信息检查、标签和回复草案。模型不会直接修改 GitHub，所有写操作都必须先进入人工审核，批准后再由 RQ Worker 异步执行。
+IssueFlow 通过 GitHub Webhook 接收 Issue 事件，用 LangGraph 编排大模型分析流程，生成分类、风险判断、缺失复现信息检查和标签/回复草案，再从历史 Issue 中检索相似问题辅助查重。模型不会直接修改 GitHub：所有外部写操作都必须先进入人工审核，批准后才由后台 Worker 异步执行。
 
-> 当前状态：核心 MVP 已完成，并已在真实 GitHub Issue 上跑通
-> 项目类型：工作流型 Agent / Agent 应用后端
-> 核心原则：模型负责提出建议，程序负责约束流程，人工负责批准外部操作
+This project focuses on controlled automation: **the model proposes, the system constrains, and a human approves side effects.**
+
+- 项目类型：工作流型 Agent（LangGraph workflow），非无约束通用 Agent
+- 核心原则：模型负责提出建议，程序负责约束流程，人工负责批准外部操作
+- 评估状态：Retrieval Evaluation 已按冻结协议在 held-out TEST 集上完成，报告与数据集均在 `eval/` 保留
+
+## Evaluation Snapshot
+
+历史 Issue 查重检索在 **maintainer-derived positive duplicate-relation retrieval benchmark** 上按冻结协议评测：
+
+- 语料快照 **6485** 条已入库历史 Issue；真值仅来自维护者明确操作，共 **164** 条 duplicate-relation qrels（DEV **74** / TEST **90**），按 **147** 个 Duplicate Cluster 完全隔离；
+- **frozen primary（TEST 前冻结）= `vector_chunked`**，TEST macro：Recall@5=**0.6835**、MRR@10=**0.6009**、nDCG@10=**0.6269**；
+- `vector_head512` 的 TEST macro nDCG point estimate **0.6353** 小幅高于 frozen primary，但 TEST 不用于回选方法。
+
+完整五方法对比表见 [检索评测](#检索评测)。
 
 ---
 
 ## 目录
 
-- [项目背景](#项目背景)
-- [已实现功能](#已实现功能)
-- [总体架构](#总体架构)
-- [部署架构](#部署架构)
-- [Webhook 接入流程](#webhook-接入流程)
+- [Evaluation Snapshot](#evaluation-snapshot)
+- [为什么需要 IssueFlow](#为什么需要-issueflow)
+- [核心设计](#核心设计)
+- [系统总览](#系统总览)
+- [事件接入与事务一致性](#事件接入与事务一致性)
 - [Agent 工作流](#agent-工作流)
 - [人工审核与 GitHub 写回](#人工审核与-github-写回)
-- [数据模型](#数据模型)
-- [状态流转](#状态流转)
-- [安全边界](#安全边界)
+- [历史 Issue 检索](#历史-issue-检索)
+- [检索评测](#检索评测)
+- [可观测性](#可观测性)
+- [安全与可靠性](#安全与可靠性)
+- [API 一览](#api-一览)
 - [技术栈](#技术栈)
 - [项目结构](#项目结构)
-- [本地运行](#本地运行)
+- [快速开始](#快速开始)
 - [配置 GitHub Webhook](#配置-github-webhook)
 - [使用方式](#使用方式)
-- [API 说明](#api-说明)
-- [设计说明](#设计说明)
-- [真实演示](#真实演示)
+- [验证路径](#验证路径)
 - [当前边界](#当前边界)
 - [Roadmap](#roadmap)
+- [文档与评估产物](#文档与评估产物)
 
 ---
 
-## 项目背景
+## 为什么需要 IssueFlow
 
-GitHub 仓库中的 Issue 通常需要维护者手工完成以下工作：
+GitHub 仓库的 Issue 维护通常是重复且耗时的：判断类型、评估优先级、核对复现信息、回复提问、打标签、排查是否已有重复 Issue。
 
-- 判断 Issue 属于 Bug、功能建议、文档问题还是普通咨询；
-- 判断优先级和潜在安全风险；
-- 检查是否缺少运行环境、版本、复现步骤和错误日志；
-- 编写补充信息回复；
-- 添加标签；
-- 决定是否允许自动化系统执行写操作。
+直接让大模型修改 GitHub 有明显风险：
 
-直接让大模型修改 GitHub 存在明显风险：
-
-- 模型输出具有不确定性；
-- Issue 正文属于外部不可信输入；
-- 模型可能生成错误标签或不合适的公开回复；
+- 模型输出不确定，可能生成错误标签或不合适的公开回复；
+- Issue 正文属于外部不可信输入，不能当作可执行指令；
 - 安全漏洞不适合自动公开处理；
-- 外部 API 调用需要权限、状态和失败记录。
+- 外部 API 调用需要权限、状态与失败记录。
 
-IssueFlow 将整个过程拆分为：
+IssueFlow 把整个过程拆成一条受约束的流水线，而不是把钥匙直接交给模型：
 
 ```text
 事件接入
-→ Agent 分析
+→ 验签 / 去重 / 事务入库
+→ 后台 Agent 分析
 → 生成命令草案
 → 人工审核
-→ 异步写回 GitHub
+→ Worker 异步写回 GitHub
 → 保存执行结果
 ```
 
-系统不会让模型直接调用 GitHub API，而是先将模型建议转换为受约束的命令草案。
+## 核心设计
 
----
-
-## 已实现功能
-
-| 模块 | 当前能力 |
+| 原则 | 含义 |
 |---|---|
-| GitHub Webhook | 接收真实 `issues` 事件 |
-| Webhook 安全 | HMAC-SHA256 签名校验 |
-| 事件去重 | 基于 `X-GitHub-Delivery` 唯一约束 |
-| 事件持久化 | 保存原始投递和标准化 Issue 事件 |
-| 异步执行 | Redis + RQ Worker |
-| Agent 编排 | LangGraph `StateGraph` |
-| 结构化输出 | Pydantic Schema |
-| Issue 分诊 | 类型、优先级、风险、置信度 |
-| 复现检查 | 检查运行环境、版本、步骤、结果和日志 |
-| 风险分流 | 高风险 Issue 进入安全审核分支 |
-| 命令草案 | `add_label`、`post_comment` |
-| 人工审核 | approve / reject |
-| 并发控制 | `SELECT FOR UPDATE` 防止重复审核 |
-| GitHub 写回 | 添加标签、发布评论 |
-| 状态记录 | pending、running、approved、executing、executed、failed |
-| 最小权限 | Fine-grained PAT，仅授权指定仓库的 Issues 写权限 |
+| 模型提出建议 | 模型只生成结构化分析结果和命令草案 |
+| 程序限定能力 | 命令白名单只允许 `add_label` 与 `post_comment`；Pydantic 强制输出 Schema |
+| 人工批准外部写 | 任何 GitHub 写操作都必须先通过 Review Console 审核 |
+| PostgreSQL 是事实来源 | 状态与错误保存在数据库，Redis 只做任务队列 |
+| 可追踪 | 每条 Agent 运行记录节点级 Trace、Token 与估算成本 |
 
----
+模型不能：关闭 Issue、删除评论、修改代码、创建 PR、执行 Issue 文本中的脚本、绕过人工审核调用 GitHub。
 
-## 总体架构
+## 系统总览
 
 ```mermaid
-flowchart LR
-    USER["Issue 提交者"]
-    GH["GitHub Repository"]
-    SMEE["Smee Webhook Proxy"]
-    API["FastAPI Backend"]
-    PG[("PostgreSQL")]
-    REDIS[("Redis")]
-    RQ["RQ Queue"]
-    AW["Agent Worker"]
-    AGENT["LangGraph Agent"]
-    REVIEW["Review API"]
-    CW["Command Worker"]
-    CLIENT["GitHub API Client"]
-    LLM["DeepSeek API"]
-    MAINTAINER["维护者"]
+flowchart TB
+    subgraph Ext["外部"]
+        GH["GitHub"]
+        LLM["LLM API"]
+    end
 
-    USER -->|"创建 / 编辑 Issue"| GH
-    GH -->|"issues webhook"| SMEE
-    SMEE -->|"POST /webhooks/github"| API
+    subgraph App["Docker Compose 应用"]
+        API["FastAPI backend :8000"]
+        PG[("PostgreSQL + pgvector")]
+        RD[("Redis 7")]
+        Q["RQ Queue"]
+        AW["Agent Worker"]
+        CW["Command Worker"]
+        UI["Review Console /ui/"]
+    end
 
-    API -->|"验签、去重、事务入库"| PG
-    API -->|"enqueue agent_run_id"| RQ
-    RQ --> AW
-    AW --> AGENT
-    AGENT -->|"LLM request"| LLM
-    LLM -->|"结构化结果"| AGENT
-    AGENT -->|"Agent Result / Review Task / Commands"| PG
-
-    MAINTAINER -->|"查询待审核任务"| REVIEW
-    REVIEW --> PG
-    MAINTAINER -->|"approve / reject"| REVIEW
-    REVIEW -->|"更新审核状态"| PG
-    REVIEW -->|"enqueue approved commands"| RQ
-
-    RQ --> CW
-    CW -->|"读取 approved command"| PG
-    CW --> CLIENT
-    CLIENT -->|"add label / post comment"| GH
+    GH -->|"issues webhook"| API
+    API -->|"单事务：delivery + event + run + outbox"| PG
+    API -->|"enqueue agent-run"| Q
+    Q --> AW
+    AW -->|"LangGraph 分析"| LLM
+    AW -->|"结果 + 审核任务 + 命令草案"| PG
+    UI -->|"GET /review-tasks"| API
+    UI -->|"approve / reject"| API
+    API -->|"approved 写入 outbox"| PG
+    API -->|"enqueue review-commands"| Q
+    Q --> CW
+    CW -->|"add_label / post_comment"| GH
     CW -->|"executed / failed"| PG
+    API -->|"GET /historical-issues/search"| PG
+    RD -->|"队列后端"| Q
 ```
-
-### 架构职责
 
 | 组件 | 职责 |
 |---|---|
-| FastAPI Backend | 接收 Webhook、提供查询和审核 API |
-| PostgreSQL | 保存业务事实、状态和错误信息 |
-| Redis | 为 RQ 提供队列和任务调度能力 |
-| Agent Worker | 执行大模型分析 |
-| LangGraph | 编排分类、风险判断和回复生成流程 |
-| Review API | 查询、批准或拒绝命令草案 |
-| Command Worker | 执行批准后的 GitHub 写操作 |
-| GitHub API Client | 封装标签与评论接口 |
-| DeepSeek | 提供 Issue 分析所需的大模型能力 |
+| FastAPI backend | 接收 Webhook、提供审核/检索/观测 API、静态托管 Review Console |
+| PostgreSQL | 业务事实、审核状态、命令、检索向量（pgvector）与 Trace |
+| Redis + RQ | 任务队列；Agent 与 Command Worker 从中取任务 |
+| Agent Worker | 执行 LangGraph 分析流程，调用 LLM 生成结构化结果 |
+| Command Worker | 执行批准后的 GitHub 写操作（加标签、发评论） |
+| Review Console | 只读展示 + 决策操作，页面需管理员 Token 解锁 |
+| LLM API | 通过 OpenAI-compatible 接口配置，默认 DeepSeek |
 
----
+## 事件接入与事务一致性
 
-## 部署架构
+Webhook 端只做三件事：验签、去重、入库后尽快返回。分析等耗时工作交给 Worker 异步执行，避免外部服务失败拖垮入口请求。
 
-当前项目通过 Docker Compose 在本地运行。
+支持 GitHub `issues` 事件，action 白名单为 `opened` / `edited` / `closed` / `reopened`。Pull Request 事件只记录 Delivery 后忽略。签名使用 `X-Hub-Signature-256` HMAC-SHA256 校验；`X-GitHub-Delivery` 唯一约束防止重复入库。
 
-```mermaid
-flowchart TB
-    subgraph Internet["外部服务"]
-        GITHUB["GitHub"]
-        DEEPSEEK["DeepSeek API"]
-        SMEE["Smee"]
-    end
+### 单事务交付
 
-    subgraph Host["本地开发环境"]
-        subgraph Compose["Docker Compose"]
-            BACKEND["backend\nFastAPI :8000"]
-            WORKER["worker\nRQ Worker"]
-            POSTGRES[("postgres\nPostgreSQL :5432")]
-            REDIS[("redis\nRedis :6379")]
-        end
-    end
-
-    GITHUB -->|"Webhook"| SMEE
-    SMEE -->|"localhost:8000/webhooks/github"| BACKEND
-
-    BACKEND --> POSTGRES
-    BACKEND --> REDIS
-
-    REDIS --> WORKER
-    WORKER --> POSTGRES
-    WORKER --> DEEPSEEK
-    WORKER --> GITHUB
-```
-
-### 数据职责
+收到事件后，后端在**一个数据库事务**里完成：
 
 ```text
-PostgreSQL
-= 业务事实来源
-
-Redis
-= 队列和任务调度
-
-GitHub
-= 外部 Issue 状态
-
-DeepSeek
-= 模型推理服务
+INSERT webhook_deliveries (delivery_id 幂等)
+INSERT issue_events
+INSERT agent_runs
+INSERT outbox_events (event_type = 'agent_run')
+必要时 INSERT outbox_events (event_type = 'issue_index')
 ```
 
-即使 Redis 中的任务数据丢失，已经入库的 Issue、Agent Run、审核任务和命令仍然保存在 PostgreSQL 中。
+事务提交后再投递 RQ。投递失败时 Outbox 记录保持 `pending`，由扫描任务按指数退避重试，因此数据库中的任务不会因为 Redis 短时不可用而丢失。这套机制提供**至少一次投递**和本地幂等，不等于跨系统 exactly-once。
 
----
-
-## Webhook 接入流程
-
-### Webhook 时序图
-
-```mermaid
-sequenceDiagram
-    autonumber
-
-    participant GH as GitHub
-    participant API as FastAPI
-    participant DB as PostgreSQL
-    participant Q as Redis / RQ
-    participant W as Agent Worker
-
-    GH->>API: POST /webhooks/github
-    Note over GH,API: X-Hub-Signature-256<br/>X-GitHub-Event<br/>X-GitHub-Delivery
-
-    API->>API: 读取原始请求体
-    API->>API: HMAC-SHA256 验签
-
-    alt 签名无效
-        API-->>GH: 401 Invalid GitHub signature
-    else 签名有效
-        API->>API: 检查 event_name 和 action
-
-        alt 非 issues 事件
-            API-->>GH: 200 ignored
-        else 不支持的 action
-            API->>DB: 保存 Webhook Delivery
-            API-->>GH: 200 ignored
-        else 支持的 issues action
-            API->>DB: 开启事务
-            DB->>DB: 插入 webhook_deliveries
-            DB->>DB: 插入 issue_events
-            DB-->>API: issue_event_id
-
-            alt Delivery 已存在
-                API-->>GH: 200 duplicate
-            else 新事件
-                API->>DB: 创建 agent_run
-                DB-->>API: agent_run_id
-                API->>Q: enqueue process_issue_agent_run
-                Q-->>API: rq_job_id
-                API->>DB: 保存 rq_job_id
-                API-->>GH: 200 accepted
-                Q->>W: 执行 Agent 任务
-            end
-        end
-    end
-```
-
-### 当前支持的 GitHub action
-
-```text
-opened
-edited
-closed
-reopened
-```
-
-不支持的 action 会保存原始 Webhook，但不会创建 Issue Event 或触发 Agent。
-
-### Webhook 去重
-
-系统使用：
-
-```text
-X-GitHub-Delivery
-```
-
-作为 Webhook Delivery 唯一标识。
-
-```mermaid
-flowchart LR
-    REQUEST["Webhook Request"]
-    DELIVERY["读取 X-GitHub-Delivery"]
-    INSERT["INSERT webhook_deliveries"]
-    UNIQUE{"delivery_id 是否已存在"}
-    NEW["创建 Issue Event"]
-    DUP["返回 duplicate"]
-
-    REQUEST --> DELIVERY --> INSERT --> UNIQUE
-    UNIQUE -->|"否"| NEW
-    UNIQUE -->|"是"| DUP
-```
-
----
+Outbox 事件类型：`agent_run`（触发 Agent 分析）、`review_commands`（审核批准后执行命令）、`issue_index`（后台索引历史 Issue）。
 
 ## Agent 工作流
 
-当前 Agent 是预定义流程的工作流型 Agent。
-
-模型负责分析和生成结构化结果，程序负责规定节点、分支和允许执行的动作。
-
-### LangGraph 节点图
-
-```mermaid
-flowchart TB
-    START([START])
-    TRIAGE["triage_issue<br/>分类 / 优先级 / 风险 / 置信度"]
-    ROUTE{"risk_level == high?"}
-    SECURITY["security_review<br/>安全提示 / 禁止公开动作"]
-    DRAFT["draft_review<br/>复现检查 / 摘要 / 建议回复"]
-    ACTIONS["prepare_actions<br/>生成标签和评论草案"]
-    END([END])
-
-    START --> TRIAGE
-    TRIAGE --> ROUTE
-
-    ROUTE -->|"是"| SECURITY
-    SECURITY --> END
-
-    ROUTE -->|"否"| DRAFT
-    DRAFT --> ACTIONS
-    ACTIONS --> END
-```
-
-### Agent 状态
-
-```mermaid
-flowchart LR
-    INPUT["Issue 输入<br/>repo / number / title / body"]
-    TRIAGE["分诊结果<br/>category / priority / risk / confidence"]
-    REVIEW["审核草案<br/>missing fields / summary / reply"]
-    ACTIONS["命令草案<br/>add_label / post_comment"]
-    RESPONSE["IssueAgentResponse"]
-
-    INPUT --> TRIAGE --> REVIEW --> ACTIONS --> RESPONSE
-```
-
-### 分类结果
+Agent 是代码预先定义路径的工作流型 Agent，节点由 LangGraph `StateGraph` 编排：
 
 ```text
-bug
-feature
-question
-documentation
-other
+triage_issue（分类 / 优先级 / 风险 / 置信度）
+→ 风险路由（risk_level == high?）
+→ draft_review（复现信息检查 / 摘要 / 建议回复）
+   或 security_review（高风险：只给安全提示，不生成公开动作）
+→ prepare_actions（生成标签与评论草案）
 ```
 
-### GitHub 标签映射
+分类结果：`bug` / `feature` / `question` / `documentation` / `other`。标签映射为 `bug`、`enhancement`、`question`、`documentation`；`other` 不自动打标签（“无法归类”不等于“无效 Issue”）。
 
-```text
-bug           → bug
-feature       → enhancement
-question      → question
-documentation → documentation
-other         → 不自动添加标签
-```
-
-`other` 不会被强行映射成 `invalid`，因为“无法归类”不等于“无效 Issue”。
-
-### 高风险处理
-
-当内容涉及以下情况时，Agent 将 `risk_level` 设置为 `high`：
-
-- 漏洞利用；
-- 认证绕过；
-- 密钥泄露；
-- 隐私数据；
-- 危险执行操作。
-
-高风险分支：
-
-```mermaid
-flowchart LR
-    ISSUE["高风险 Issue"]
-    RESULT["NEEDS_SECURITY_REVIEW"]
-    ACTIONS["proposed_actions = []"]
-    HUMAN["维护者人工处理"]
-
-    ISSUE --> RESULT
-    RESULT --> ACTIONS
-    ACTIONS --> HUMAN
-```
-
-高风险 Issue 不会自动生成公开标签或评论命令。
-
----
+高风险分支（漏洞利用、认证绕过、密钥泄露、隐私数据、危险执行）只产出 `NEEDS_SECURITY_REVIEW`，不生成任何公开标签或评论命令，交由维护者人工处理。
 
 ## 人工审核与 GitHub 写回
 
-### 审核与执行时序图
+### Review Console（/ui/）
 
-```mermaid
-sequenceDiagram
-    autonumber
+后端托管一个静态审核界面 `/ui/`（原生 HTML/CSS/JS，非前端框架）：
 
-    participant U as 维护者
-    participant API as FastAPI
-    participant DB as PostgreSQL
-    participant Q as Redis / RQ
-    participant W as Command Worker
-    participant GC as GitHub Client
-    participant GH as GitHub
+- 按 `pending` / `approved` / `rejected` 分组展示审核任务；
+- 详情页展示原始 Issue、Agent 摘要、缺失复现信息、重复判断、相似 Issue、建议回复和命令草案；
+- 审核人必须填写，备注可选；批准/拒绝前有确认弹窗；
+- 审核台默认锁定：需输入 `REVIEW_ADMIN_TOKEN` 解锁，Token 仅保存在当前浏览器页面会话（`sessionStorage`），不进入 URL；可随时点击“锁定审核台”清除；
+- 页面启用 CSP（`default-src 'self'`）与 `no-referrer`；`401`（Token 无效）或 `503`（服务端未配置 Token）时自动重新锁定。
 
-    U->>API: GET /review-tasks?status=pending
-    API->>DB: 查询 Review Task 和 Commands
-    DB-->>API: Agent Result + Commands
-    API-->>U: 返回待审核内容
+![IssueFlow Review Console overview showing the review queue, Agent assessment, risk level and pending human review](docs/images/review-console-overview.png)
 
-    alt 审核拒绝
-        U->>API: POST /review-tasks/{id}/reject
-        API->>DB: SELECT review_task FOR UPDATE
-        API->>DB: review_task = rejected
-        API->>DB: commands = rejected
-        API-->>U: 200 rejected
-    else 审核批准
-        U->>API: POST /review-tasks/{id}/approve
-        API->>DB: SELECT review_task FOR UPDATE
-        API->>DB: review_task = approved
-        API->>DB: commands = approved
-        API->>Q: enqueue process_review_commands
-        Q-->>API: rq_job_id
-        API-->>U: 200 approved
+*Review Console — 本地合成演示。维护者在任何 GitHub 外部写操作发生前检查 Issue 上下文、Agent 判断与待执行动作。*
 
-        Q->>W: 执行审核任务
-        W->>DB: 查询 approved commands
+### 审核鉴权
 
-        loop 每条 Command
-            W->>DB: status = executing
+审核 API 使用**最小共享管理员 Token**（`X-Review-Admin-Token` 请求头，`secrets.compare_digest` 比较），不是 RBAC / OAuth / IAM。未配置时返回 `503`，Token 不匹配返回 `401`。
 
-            alt add_label
-                W->>GC: add_issue_label
-                GC->>GH: POST /issues/{number}/labels
-            else post_comment
-                W->>GC: post_issue_comment
-                GC->>GH: POST /issues/{number}/comments
-            end
-
-            alt GitHub API 成功
-                GH-->>GC: success
-                GC-->>W: response
-                W->>DB: status = executed
-            else GitHub API 失败
-                GH-->>GC: error
-                GC-->>W: exception
-                W->>DB: status = failed + error_message
-            end
-        end
-    end
-```
-
-### 为什么需要人工审核
-
-```mermaid
-flowchart LR
-    LLM["LLM 输出"]
-    SCHEMA["Pydantic 校验"]
-    PROPOSAL["Command Proposal"]
-    REVIEW{"人工审核"}
-    APPROVE["approved"]
-    REJECT["rejected"]
-    EXECUTE["调用 GitHub API"]
-    STOP["不执行"]
-
-    LLM --> SCHEMA --> PROPOSAL --> REVIEW
-    REVIEW -->|"approve"| APPROVE --> EXECUTE
-    REVIEW -->|"reject"| REJECT --> STOP
-```
-
-模型只能生成两种命令：
-
-```text
-add_label
-post_comment
-```
-
-模型不能：
-
-- 关闭 Issue；
-- 删除评论；
-- 修改仓库代码；
-- 创建 Pull Request；
-- 执行 Issue 中提供的脚本；
-- 绕过人工审核直接访问 GitHub。
-
----
-
-## 数据模型
-
-### ER 图
-
-```mermaid
-erDiagram
-    WEBHOOK_DELIVERIES ||--o| ISSUE_EVENTS : creates
-    ISSUE_EVENTS ||--o| AGENT_RUNS : triggers
-    AGENT_RUNS ||--o| REVIEW_TASKS : creates
-    REVIEW_TASKS ||--o{ GITHUB_COMMANDS : contains
-
-    WEBHOOK_DELIVERIES {
-        int id PK
-        string delivery_id UK
-        string event_name
-        jsonb raw_payload
-        timestamptz created_at
-    }
-
-    ISSUE_EVENTS {
-        int id PK
-        int webhook_delivery_id FK
-        string source
-        string event_type
-        string repo
-        string action
-        int issue_number
-        string issue_title
-        text issue_body
-        timestamptz created_at
-    }
-
-    AGENT_RUNS {
-        int id PK
-        int issue_event_id UK
-        string status
-        string rq_job_id
-        jsonb result_json
-        timestamptz started_at
-        timestamptz finished_at
-        text error_message
-        timestamptz created_at
-    }
-
-    REVIEW_TASKS {
-        int id PK
-        int agent_run_id FK_UK
-        string status
-        string reviewer
-        text review_note
-        timestamptz created_at
-        timestamptz reviewed_at
-    }
-
-    GITHUB_COMMANDS {
-        int id PK
-        int review_task_id FK
-        string command_type
-        jsonb payload
-        string status
-        string idempotency_key UK
-        text error_message
-        timestamptz created_at
-        timestamptz updated_at
-        timestamptz executed_at
-    }
-```
-
-### 数据表职责
-
-| 数据表 | 职责 |
-|---|---|
-| `webhook_deliveries` | 保存 GitHub Delivery ID 和原始请求 |
-| `issue_events` | 保存标准化 Issue 事件 |
-| `agent_runs` | 保存 Agent 任务状态和结构化结果 |
-| `review_tasks` | 保存人工审核状态、审核人和备注 |
-| `github_commands` | 保存标签、评论命令及执行结果 |
-
----
-
-## 状态流转
-
-### Agent Run
-
-```mermaid
-stateDiagram-v2
-    [*] --> pending
-    pending --> running : Worker 开始执行
-    running --> completed : Agent 成功
-    running --> failed : Agent 异常
-    pending --> failed : 入队失败
-    completed --> [*]
-    failed --> [*]
-```
-
-### Review Task
-
-```mermaid
-stateDiagram-v2
-    [*] --> pending
-    pending --> approved : approve
-    pending --> rejected : reject
-    approved --> [*]
-    rejected --> [*]
-```
-
-重复批准或拒绝已经完成的审核任务，会返回：
-
-```text
-409 Conflict
-```
-
-### GitHub Command
+### 决策语义
 
 ```mermaid
 stateDiagram-v2
     [*] --> proposed
-
     proposed --> approved : 审核批准
     proposed --> rejected : 审核拒绝
-
-    approved --> executing : Worker 开始执行
+    approved --> executing : Worker 取到命令
     executing --> executed : GitHub API 成功
-    executing --> failed : GitHub API 或本地处理失败
-
+    executing --> failed : 本地或 GitHub 失败
+    approved --> [*]
     rejected --> [*]
     executed --> [*]
     failed --> [*]
 ```
 
----
+批准流程：`review_tasks` 置为 `approved`、`github_commands` 置为 `approved`、写 `review_commands` Outbox，然后 Worker 依次执行命令。拒绝流程把仍处于 `proposed` 的命令置为 `rejected`，不进入执行队列。重复决定同一个任务返回 `409 Conflict`；并发决定由 `SELECT ... FOR UPDATE` 串行化。
 
-## 安全边界
+### 崩溃语义（诚实边界）
 
-### 信任边界图
+- 已完成的 GitHub 写操作不自动重放：连接中断可能无法确认评论是否已创建，系统对这种情况的 HTTP 失败按 `retry_safe=false` 处理，避免静默发布重复评论；
+- 外部成功但本地状态更新前崩溃的 `executing` 命令保留 `executing`，需要人工对账，不自动重放；
+- GitHub 请求在失败前最多重试有限次数，并对 403/429 限流做专门识别；
+- 恢复入口：`POST /recovery/outbox/dispatch`、`POST /recovery/agent-runs/{id}/requeue`、`POST /recovery/github-commands/{id}/requeue`（命令重入队要求已批准、`failed` 且 `retry_safe=true`）。恢复不会绕过审核状态和命令白名单。
 
-```mermaid
-flowchart LR
-    subgraph Untrusted["不可信输入"]
-        ISSUE["Issue title / body"]
-        COMMENT["GitHub event payload"]
-    end
+## 历史 Issue 检索
 
-    subgraph Boundary["系统安全边界"]
-        VERIFY["HMAC 验签"]
-        STORE["原始事件入库"]
-        PROMPT["固定 System Prompt"]
-        SCHEMA["Pydantic Schema"]
-        ROUTE["风险分流"]
-        WHITELIST["Command 白名单"]
-        REVIEW["人工审核"]
-    end
+### 链路与数据
 
-    subgraph TrustedAction["受控外部操作"]
-        TOKEN["Fine-grained PAT"]
-        API["GitHub REST API"]
-    end
+历史 Issue 进入 `historical_issues`（按 `(repo, issue_number)` 幂等更新，内容哈希不变时不重复生成向量或 Chunk）。文本表示使用确定性规范化：Unicode NFKC、统一换行、空正文写为 `[empty]`、固定 `Title`/`Body` 字段顺序，表示版本记为 `issue-title-body-v2`。
 
-    ISSUE --> VERIFY
-    COMMENT --> VERIFY
-    VERIFY --> STORE
-    STORE --> PROMPT
-    PROMPT --> SCHEMA
-    SCHEMA --> ROUTE
-    ROUTE --> WHITELIST
-    WHITELIST --> REVIEW
-    REVIEW -->|"批准"| TOKEN
-    TOKEN --> API
+```text
+GitHub Backfill / Issue Webhook
+→ Pull Request 过滤
+→ repo + issue_number 幂等更新
+→ content_hash 判断内容变化
+→ lexical / vector 检索
+→ RRF 融合 Top-K
+→ LLM 结构化重复判断（仅审核建议）
 ```
 
-### 当前安全措施
+### Embedding
+
+Embedding 在 Docker CPU 内本地运行，不把 Issue 内容发送到外部 Embedding 服务：
+
+- Provider：`fastembed`，模型 `BAAI/bge-small-en-v1.5`，384 维；
+- 模型缓存位于持久化 Volume `fastembed_cache`（`/var/cache/issueflow/fastembed`）；缓存完成后可设 `EMBEDDING_LOCAL_FILES_ONLY=true` 禁止联网加载；
+- 启动探针会实际生成向量并校验维度，不一致时终止启动，不写入数据库；
+- Provider 取值：`fastembed`（本地 CPU）、`disabled`（禁用向量检索）、`fake`（仅测试/合成评测）、其他值明确失败，不会静默切换云端。
+
+### 长文本策略
+
+`bge-small-en-v1.5` 的输入上限为 512 tokens，系统有两种表示：
+
+- **head512**：规范化标题+正文直接截到 512 tokens，同时记录原始/实际输入 token 数与 `truncated` 标记，不静默丢信息；
+- **chunked**：用模型附带的真实 tokenizer 分块，默认每段 384 tokens、重叠 64、单 Issue 最多 16 段，每段重复标题；长查询也用同样策略拆成多个 Query Chunk 分别检索，再按 Issue 聚合。内容哈希与配置版本键不变时不重新分块或生成向量。
+
+检索输入**只包含标题和正文**。标签、评论、`/duplicate of #N` 文本、维护者事后标记都明确排除在检索输入之外，避免把事后信息泄漏给查询。
+
+### 三种检索模式
+
+| 模式 | 机制 |
+|---|---|
+| `lexical` | PostgreSQL `pg_trgm` 相似度 + 全文检索（`websearch_to_tsquery`） |
+| `vector` | pgvector cosine 距离（`head512` 或 `chunked`），HNSW 索引 |
+| `hybrid` | 两路结果做 Reciprocal Rank Fusion（`rrf_k=60`） |
+
+Embedding 未配置或失败时，`hybrid` 自动降级为 `lexical`，并在响应中标记 `degraded=true` 与原因。当前**未启用** cross-encoder 重排器（`DUPLICATE_RERANKER_ENABLED=false`）。
+
+查询 API：
+
+```text
+GET /historical-issues/search?repo=owner/repo&query=login%20timeout&mode=hybrid&top_k=5
+```
+
+![IssueFlow review detail showing retrieved similar issues, retrieval scores, proposed GitHub commands and the human-review boundary](docs/images/review-console-detail.png)
+
+*Review detail — local synthetic demo. Retrieved historical Issues remain review evidence; the Agent only proposes constrained `add_label` / `post_comment` commands.*
+
+## 检索评测
+
+### 数据集与协议
+
+正式评测是 **maintainer-derived positive duplicate-relation retrieval benchmark**（检索召回/排序评估），不是完整“查重分类准确率”。评估仓库为 `microsoft/vscode`、`nodejs/node`、`rust-lang/rust`；正样本仅来自维护者明确操作（effective duplicate 事件或维护者身份写出的 duplicate comment）。
+
+- DEV 集 **74** 条查询，TEST 集 **90** 条查询，合计 **164** 条（两者完全隔离）；
+- 真值按无向 **Duplicate Cluster** 组织，共 **147** 个 cluster；同一 Issue / 同一 Cluster 不跨 DEV/TEST；
+- 候选语料：同仓库、不是查询自身、且 `candidate.github_created_at < query_created_at`；
+- 快照记录候选语料共 **6485** 条已入库 Issue（vscode 2236 / node 2126 / rust 2123），见 `repository_snapshots.json`；
+- 指标：Recall@1/5/10、MRR@10、nDCG@10、延迟 P50/P95，按仓库单独计算后取仓库 Macro；置信区间用固定种子的 Query 级 Bootstrap（2000 次）。
+
+### 冻结流程
+
+参数与主方法在 TEST 前由 DEV 冻结，TEST 只运行一次且不参与任何参数重选：
+
+1. DEV 比较 Query Prefix（无前缀 vs `Represent this sentence for searching relevant passages: `）与 Chunk 聚合（`max_chunk_score` vs `mean_top2_chunk_score`），按 Macro nDCG@10 选择，tie-break 倾向无前缀 / `max_chunk_score`；
+2. 冻结配置写入 `eval/reports/rag_frozen_config.json`；
+3. 预声明 primary retrieval method 写入 `eval/reports/rag_primary_method.json`；
+4. 在 held-out TEST 上运行一次，结果冻结于 `eval/reports/rag_test.json`。
+
+### TEST 结果（macro，90 条查询）
+
+| 方法 | Recall@1 | Recall@5 | Recall@10 | MRR@10 | nDCG@10 |
+|---|---|---|---|---|---|
+| lexical | 0.2197 | 0.3442 | 0.3811 | 0.3009 | 0.3147 |
+| vector_head512 | 0.4924 | 0.6723 | 0.7234 | 0.6151 | **0.6353** |
+| **vector_chunked（冻结主方法）** | 0.4816 | **0.6835** | 0.7231 | **0.6009** | **0.6269** |
+| hybrid_head512_rrf | 0.3634 | 0.6129 | 0.7313 | 0.5072 | 0.5534 |
+| hybrid_chunked_rrf | 0.3511 | 0.6408 | 0.7393 | 0.5123 | 0.5620 |
+
+**frozen primary 是 `vector_chunked`**：Macro Recall@5=0.6835、MRR@10=0.6009、nDCG@10=0.6269。它是在 DEV 上按预声明规则选出的主方法，并在 TEST 前冻结。
+
+TEST 上的最高 macro nDCG@10 point estimate 是 `vector_head512`（0.6353），但它**不是**冻结主方法，也没有被用来重新选择配置。冻结的 primary `vector_chunked` 为 0.6269，point-estimate gap = 0.0084。
+
+两种方法各自的 Bootstrap 95% CI 高度重叠：`vector_head512` [0.5464, 0.7172]、`vector_chunked` [0.5406, 0.7123]。但这些都是各方法自身的**边际 CI**；项目未执行 paired-delta significance test，因此**不对 0.0084 的差异作统计显著性声明**，也不进一步推导 significant / not significant / noise。
+
+HNSW 相对 Exact 的 Top-K 召回率与顺序一致率均为 1.0（当前语料规模下 HNSW 相对 Exact 无召回损失，延迟也未明显降低，如实保留）。
+
+### 从结果中学到什么
+
+1. **Chunk 不是普遍更优**：`vector_chunked` 在 DEV 胜出被冻结为主方法，但 TEST 上 nDCG@10（0.6269）低于 `vector_head512`（0.6353）。长文本分块对召回有帮助，但对整体排序并非稳定占优。
+2. **召回与排序是两回事**：`vector_chunked` 的 Recall@5（0.6835）略高于 `head512`（0.6723），但 nDCG 反而更低——长尾召回提升没有自动转成更好的排序质量。
+3. **RRF Hybrid 是一个“扩大覆盖、削弱顶部排序”的 trade-off**：冻结配置下，`hybrid_chunked_rrf` 的 macro Recall@10 为 0.7393，高于 `vector_chunked` 的 0.7231——RRF 把 lexical 分路的候选带进较深位置，扩大了候选覆盖；但其 macro nDCG@10 为 0.5620，低于 `vector_chunked` 的 0.6269，说明当前 RRF fusion 在扩大覆盖的同时削弱了顶部排序质量。
+4. **鲁棒性 bug 值得修**：极长或含长 `-` 连串的查询曾让 `websearch_to_tsquery` 解析栈溢出（`tsquery stack too small`）。通过把 tsquery 输入截断到 2000 字符并折叠 `-` 连串修复，并补充了回归测试。
+
+完整的协议、泄漏边界与长文本策略见 [文档与评估产物](#文档与评估产物)。
+
+## 可观测性
+
+观测基于 PostgreSQL 持久化，不引入 OpenTelemetry / Prometheus / Grafana：
+
+- `GET /traces`：Agent 运行列表（状态、模型、Prompt 版本、耗时、Token、估算成本）；
+- `GET /traces/{trace_id}`：单条运行的节点级 Trace（每节点输入/输出摘要、耗时、Token、错误）；
+- `GET /metrics/agent-runs`：聚合指标（完成/失败数、结构化输出成功率、平均 Token 与估算成本、耗时 P50/P95）。
+
+## 安全与可靠性
 
 | 风险 | 当前措施 |
 |---|---|
 | 伪造 Webhook | HMAC-SHA256 验签 |
 | Webhook 重放 | `X-GitHub-Delivery` 唯一约束 |
-| 非目标事件触发 | `event_name` 和 `action` 白名单 |
-| Prompt Injection | System Prompt 明确禁止执行 Issue 中的指令 |
-| 模型自由输出 | Pydantic 结构化输出 |
-| 模型越权 | 只允许 `add_label` 和 `post_comment` |
+| 非目标事件触发 | `event_name` / `action` 白名单，PR 事件忽略 |
+| Prompt Injection | 固定 System Prompt，Issue 文本只作为数据 |
+| 模型自由输出 | Pydantic 结构化输出 + 命令类型白名单 |
+| 未审核自动写入 | Human-in-the-loop；`GITHUB_WRITE_ENABLED=false` 为 Compose 默认 |
 | 高风险内容公开 | 高风险分支不生成公开命令 |
-| 未审核自动写入 | Human-in-the-loop |
-| GitHub Token 权限过大 | Fine-grained PAT，仅授权单仓库 Issues 权限 |
-| 重复审核 | `SELECT FOR UPDATE` |
-| 重复创建命令 | 唯一 `idempotency_key` |
+| Token 权限过大 | Fine-grained PAT，仅授权指定仓库 Issues 写权限 |
+| 重复审核 / 重复命令 | `SELECT FOR UPDATE` + 唯一 `idempotency_key` |
+| 任务丢失 | Outbox + 指数退避（基础 5s）+ 恢复接口 |
+| 外部写重复 | 崩溃窗口下的重复评论不自动重放，保留 `executing` 待人工对账 |
 
-### 当前幂等边界
+## API 一览
 
-现有唯一约束可以避免：
-
-- 同一 Delivery 重复入库；
-- 同一 Issue Event 重复创建 Agent Run；
-- 同一 Agent 输出重复创建 Command 记录；
-- 同一审核任务被并发重复决定。
-
-当前版本尚未严格保证 GitHub 外部操作在所有崩溃窗口下只执行一次。
-
-例如：
-
-```text
-GitHub 评论发布成功
-→ Worker 在更新数据库前崩溃
-→ 数据库仍显示 executing
-→ 后续恢复可能再次发布评论
-```
-
-外部操作对账和命令恢复属于后续增强。
-
----
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/health` `/health/embedding` | 健康与 Embedding 探针 |
+| `POST` | `/webhooks/github` | 接收真实 GitHub Webhook |
+| `POST` | `/agent/analyze` | 直接调用 Agent 分析（调试用） |
+| `GET` | `/events` | 查询最近的 Issue 事件 |
+| `GET` | `/review-tasks?status=pending` | 查询审核任务（需审核 Token） |
+| `POST` | `/review-tasks/{id}/approve` | 批准并派发命令（需审核 Token） |
+| `POST` | `/review-tasks/{id}/reject` | 拒绝并取消待批准命令（需审核 Token） |
+| `GET` | `/historical-issues/search` | 历史 Issue 检索 |
+| `GET` | `/traces` `/traces/{trace_id}` | Agent 运行与节点级 Trace |
+| `GET` | `/metrics/agent-runs` | 聚合运行指标 |
+| `POST` | `/recovery/outbox/dispatch` 等 | 恢复入口 |
+| `GET` | `/docs` | OpenAPI 文档 |
 
 ## 技术栈
 
 | 类型 | 技术 |
 |---|---|
-| 开发语言 | Python 3.12 |
-| Web 框架 | FastAPI、Uvicorn |
-| Agent 编排 | LangGraph |
-| 模型调用 | LangChain OpenAI Compatible API |
-| 模型服务 | DeepSeek |
+| 语言 / 后端 | Python 3.12、FastAPI、Uvicorn |
+| Agent 编排 | LangGraph（workflow 模式） |
+| 模型调用 | OpenAI-compatible API（默认 DeepSeek） |
 | 数据校验 | Pydantic |
-| 数据库 | PostgreSQL、Psycopg |
-| 缓存与队列 | Redis、RQ |
+| 数据库 | PostgreSQL + pgvector、pg_trgm / 全文检索、Psycopg |
+| 迁移 | Alembic |
+| 队列 | Redis 7、RQ |
+| 检索 | FastEmbed、`BAAI/bge-small-en-v1.5`（384 维）、RRF |
 | 外部集成 | GitHub Webhook、GitHub REST API |
 | 容器化 | Docker、Docker Compose |
 | 本地 Webhook 转发 | Smee |
-
----
 
 ## 项目结构
 
@@ -718,699 +379,155 @@ GitHub 评论发布成功
 issueflow-agent/
 ├── backend/
 │   ├── Dockerfile
-│   ├── requirements.txt
+│   ├── requirements.txt / requirements-dev.txt
+│   ├── alembic.ini
+│   ├── migrations/          # Alembic 迁移（versions/0001..0005）
 │   └── app/
-│       ├── __init__.py
-│       ├── main.py
-│       ├── agent.py
-│       ├── github_webhook.py
-│       ├── github_client.py
-│       ├── job_queue.py
-│       └── tasks.py
-│
-├── database/
-│   └── init/
-│       ├── 001_create_issue_events.sql
-│       ├── 002_create_webhook_deliveries.sql
-│       ├── 003_link_issue_events_to_webhook_deliveries.sql
-│       ├── 004_create_agent_runs.sql
-│       ├── 005_create_review_tasks.sql
-│       └── 006_create_github_commands.sql
-│
-├── .env.example
-├── .gitignore
+│       ├── main.py          # FastAPI 入口，挂载路由与 /ui/
+│       ├── api/             # webhooks / issues / agent / reviews / rag / observability / recovery / evals / health
+│       ├── agents/          # LangGraph 工作流与结构化 Schema
+│       ├── rag/             # embedding / chunking / indexing / retrieval / repository / sync / schema
+│       ├── services/        # events / outbox / reviews / github / traces / evals
+│       ├── workers/         # RQ worker（agent / command / recovery / index）
+│       ├── ui/              # Review Console（index.html / app.js / styles.css）
+│       ├── core/            # 配置、审核鉴权
+│       ├── db/              # 数据库连接
+│       └── models/          # 领域模型
+├── docs/                    # rag.md、reliability.md、评测方法、泄漏边界、长文本策略 等
+├── eval/
+│   ├── datasets/            # qrels（dev/test）、clusters、snapshots、示例数据
+│   └── reports/             # rag_baseline_dev / rag_dev / rag_frozen_config / rag_primary_method / rag_test
+├── scripts/                 # 检索评测 / 语料索引 / 真值采集 等 CLI
+├── database/init/           # 基础 Schema 初始化 SQL（initdb）
 ├── docker-compose.yml
+├── .env.example
 └── README.md
 ```
 
-### 核心文件职责
-
-| 文件 | 职责 |
-|---|---|
-| `main.py` | FastAPI 路由、Webhook 接入、查询和审核接口 |
-| `agent.py` | LangGraph 状态、节点、路由和结构化输出 |
-| `github_webhook.py` | GitHub HMAC 签名校验 |
-| `github_client.py` | GitHub 标签与评论 API 封装 |
-| `job_queue.py` | Redis/RQ 队列连接和任务入队 |
-| `tasks.py` | Agent 分析任务和 GitHub Command 执行任务 |
-| `database/init` | PostgreSQL 初始化脚本 |
-
----
-
-## 本地运行
+## 快速开始
 
 ### 1. 环境要求
 
-- Docker
-- Docker Compose
-- Git
-- Node.js / npm
-- 可用的大模型 API
-- 一个用于测试的 GitHub 仓库
-- GitHub Fine-grained Personal Access Token
+Docker、Docker Compose、Git、一个 GitHub 测试仓库、GitHub PAT 与可用的大模型 API。
 
-### 2. 克隆项目
-
-```bash
-git clone https://github.com/chengyebi/issueflow-agent.git
-cd issueflow-agent
-```
-
-### 3. 配置环境变量
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`：
+编辑 `.env` 填写 `GITHUB_WEBHOOK_SECRET`、`LLM_API_KEY`、`GITHUB_TOKEN`，并按需设置 `REVIEW_ADMIN_TOKEN`。`.env` 已被 `.gitignore` 忽略。
 
-```env
-GITHUB_WEBHOOK_SECRET=replace-with-your-webhook-secret
+Compose 默认 `GITHUB_WRITE_ENABLED=false`，即未显式开启前，系统不会发出任何 GitHub 写请求。
 
-LLM_API_KEY=replace-with-your-llm-api-key
-LLM_BASE_URL=https://api.deepseek.com
-CHAT_MODEL=deepseek-v4-flash
-
-GITHUB_TOKEN=replace-with-your-github-token
-```
-
-不要将真实密钥提交到 Git。
-
-`.env` 应当被 `.gitignore` 忽略。
-
-检查：
-
-```bash
-git check-ignore -v .env
-```
-
-### 4. GitHub Token 权限
-
-建议创建 Fine-grained Personal Access Token。
-
-```text
-Repository access:
-Only select repositories
-
-Selected repository:
-issueflow-agent
-
-Repository permissions:
-Issues → Read and write
-```
-
-不需要授予：
-
-```text
-Contents Write
-Actions Write
-Administration
-```
-
-### 5. 启动服务
+### 3. 启动服务
 
 ```bash
 docker compose up -d --build
 ```
 
-检查容器：
+`docker-compose.yml` 中的 `migrate` 服务会先执行 `alembic upgrade head` 完成迁移，之后后端与 Worker 才启动。启动后可通过 `/health` 与 `/health/embedding` 探针确认 Embedding 正常（不一致时后端拒绝启动）。
+
+### 4. 健康检查
 
 ```bash
-docker compose ps
+curl --noproxy '*' http://127.0.0.1:8000/health
 ```
 
-预期包含：
-
-```text
-backend
-worker
-postgres
-redis
-```
-
-### 6. 健康检查
-
-```bash
-curl --noproxy '*' \
-  http://127.0.0.1:8000/health
-```
-
-预期：
-
-```json
-{
-  "status": "ok"
-}
-```
-
-### 7. 查看 Worker 日志
+### 5. 查看 Worker 日志
 
 ```bash
 docker compose logs -f worker
 ```
 
-Worker 正常启动时会显示：
-
-```text
-*** Listening on issueflow...
-```
-
-### 8. 验证 GitHub Token 已进入 Worker
-
-```bash
-docker compose exec worker \
-  sh -lc 'test -n "$GITHUB_TOKEN" && echo GITHUB_TOKEN_LOADED'
-```
-
-预期：
-
-```text
-GITHUB_TOKEN_LOADED
-```
-
-### 数据库初始化说明
-
-`database/init` 下的 SQL 会在 PostgreSQL 创建新数据卷时自动执行。
-
-如果数据库卷已经存在，新增 SQL 文件不会自动执行，需要手工应用对应脚本。
-
-例如：
-
-```bash
-docker compose exec -T postgres \
-  psql -U postgres -d issueflow \
-  -f /docker-entrypoint-initdb.d/005_create_review_tasks.sql
-```
-
-```bash
-docker compose exec -T postgres \
-  psql -U postgres -d issueflow \
-  -f /docker-entrypoint-initdb.d/006_create_github_commands.sql
-```
-
-仅在确认不需要保留本地数据时，才删除数据卷重新初始化：
-
-```bash
-docker compose down -v
-docker compose up -d --build
-```
-
----
-
 ## 配置 GitHub Webhook
 
-### 1. 创建 Smee Channel
-
-打开：
-
-```text
-https://smee.io/
-```
-
-创建一个 Channel，并保存 Channel URL。
-
-不要将真实 Smee Channel URL 提交到仓库。
-
-### 2. 安装 Smee Client
+本地开发用 Smee 把 GitHub 事件转发到本地后端：
 
 ```bash
 npm install -g smee-client
+smee -u https://smee.io/<YOUR_CHANNEL_ID> -t http://127.0.0.1:8000/webhooks/github
 ```
 
-### 3. 启动转发
-
-```bash
-smee \
-  -u https://smee.io/<YOUR_CHANNEL_ID> \
-  -t http://127.0.0.1:8000/webhooks/github
-```
-
-成功后终端会显示：
-
-```text
-Connected to https://smee.io/<YOUR_CHANNEL_ID>
-Forwarding to http://127.0.0.1:8000/webhooks/github
-```
-
-### 4. 配置 GitHub Webhook
-
-进入测试仓库：
-
-```text
-Settings
-→ Webhooks
-→ Add webhook
-```
-
-填写：
-
-```text
-Payload URL:
-https://smee.io/<YOUR_CHANNEL_ID>
-
-Content type:
-application/json
-
-Secret:
-与 GITHUB_WEBHOOK_SECRET 完全相同
-
-Events:
-Let me select individual events
-→ Issues
-```
-
-创建或编辑 Issue 后，Smee 终端应显示：
-
-```text
-POST http://127.0.0.1:8000/webhooks/github - 200
-```
-
----
+在测试仓库 `Settings → Webhooks → Add webhook` 中填写 Smee 的 Payload URL、`Content type: application/json`、`Secret`（与 `GITHUB_WEBHOOK_SECRET` 相同），Events 只勾选 `Issues`。
 
 ## 使用方式
 
-### 1. 查询最近的 Issue 事件
+### 查询待审核任务
 
 ```bash
 curl --noproxy '*' \
-  http://127.0.0.1:8000/events
+  'http://127.0.0.1:8000/review-tasks?status=pending' \
+  -H 'X-Review-Admin-Token: <REVIEW_ADMIN_TOKEN>'
 ```
 
-### 2. 直接测试 Agent 分析
+### 批准任务
 
 ```bash
 curl --noproxy '*' \
-  -X POST \
-  http://127.0.0.1:8000/agent/analyze \
+  -X POST 'http://127.0.0.1:8000/review-tasks/<REVIEW_TASK_ID>/approve' \
   -H 'Content-Type: application/json' \
-  -d '{
-    "repo": "chengyebi/issueflow-agent",
-    "issue_number": 1001,
-    "title": "登录接口返回 500",
-    "body": "输入错误密码后，接口返回 500。"
-  }'
+  -H 'X-Review-Admin-Token: <REVIEW_ADMIN_TOKEN>' \
+  -d '{"reviewer": "cy", "review_note": "确认 Agent 分析结果"}'
 ```
 
-### 3. 查询待审核任务
+批准后命令进入 `review_commands` Outbox，由 Command Worker 执行并写回 GitHub。
+
+### 拒绝任务
 
 ```bash
 curl --noproxy '*' \
-  'http://127.0.0.1:8000/review-tasks?status=pending'
-```
-
-返回内容包括：
-
-- Agent 分类；
-- 优先级；
-- 风险等级；
-- 置信度；
-- 缺失复现字段；
-- 摘要；
-- 建议回复；
-- 标签和评论命令草案；
-- `review_task_id`。
-
-### 4. 批准任务
-
-```bash
-curl --noproxy '*' \
-  -X POST \
-  'http://127.0.0.1:8000/review-tasks/<REVIEW_TASK_ID>/approve' \
+  -X POST 'http://127.0.0.1:8000/review-tasks/<REVIEW_TASK_ID>/reject' \
   -H 'Content-Type: application/json' \
-  -d '{
-    "reviewer": "cy",
-    "review_note": "确认 Agent 分析结果，允许写回 GitHub"
-  }'
+  -H 'X-Review-Admin-Token: <REVIEW_ADMIN_TOKEN>' \
+  -d '{"reviewer": "cy", "review_note": "分析结果不合适"}'
 ```
 
-批准后：
+拒绝后仍处于 `proposed` 的命令被取消，不会进入执行队列。
 
-```text
-review_task = approved
-commands = approved
-→ RQ 入队
-→ Worker 执行
-→ GitHub 添加标签 / 发布评论
-→ commands = executed
-```
-
-### 5. 拒绝任务
+### 历史 Issue 检索
 
 ```bash
 curl --noproxy '*' \
-  -X POST \
-  'http://127.0.0.1:8000/review-tasks/<REVIEW_TASK_ID>/reject' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "reviewer": "cy",
-    "review_note": "分析结果不合适，不执行 GitHub 操作"
-  }'
+  'http://127.0.0.1:8000/historical-issues/search?repo=owner/repo&query=login%20timeout&mode=hybrid&top_k=5'
 ```
 
-拒绝后：
+## 验证路径
 
-```text
-review_task = rejected
-commands = rejected
-```
+项目曾用自身仓库作为测试仓库，在真实 GitHub Issue 上跑通完整链路：创建 Issue → Webhook 到达 → Agent 判定并生成标签/评论草案 → 人工批准 → Worker 添加标签并发布评论 → 命令状态变为 `executed`。一次真实的端到端写回发生在 [GitHub Issue #5](https://github.com/chengyebi/issueflow-agent/issues/5)：人工批准后，IssueFlow 为它添加 `bug` 标签，并发布批准后的补充信息评论。
 
-对应命令不会进入执行队列。
+![GitHub Issue 5 showing the bug label and approved follow-up comment written back by IssueFlow](docs/images/github-writeback-demo.png)
 
-### 6. 查询已批准或已拒绝任务
+*真实端到端写回演示：人工批准后，IssueFlow 为 GitHub Issue #5 添加 `bug` 标签，并发布批准后的补充信息评论。*
 
-```bash
-curl --noproxy '*' \
-  'http://127.0.0.1:8000/review-tasks?status=approved'
-```
-
-```bash
-curl --noproxy '*' \
-  'http://127.0.0.1:8000/review-tasks?status=rejected'
-```
-
----
-
-## API 说明
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/health` | 健康检查 |
-| `GET` | `/events` | 查询最近的 Issue 事件 |
-| `POST` | `/issues` | 基础 Issue 请求模型测试 |
-| `POST` | `/dev/events/github` | 本地模拟 GitHub Issue 事件 |
-| `POST` | `/webhooks/github` | 接收真实 GitHub Webhook |
-| `POST` | `/agent/analyze` | 直接调用 Agent 分析 |
-| `GET` | `/review-tasks` | 查询审核任务 |
-| `POST` | `/review-tasks/{id}/approve` | 批准任务 |
-| `POST` | `/review-tasks/{id}/reject` | 拒绝任务 |
-
-### 查询审核任务参数
-
-```text
-status=pending
-status=approved
-status=rejected
-```
-
-非法状态会返回：
-
-```text
-400 Invalid review status
-```
-
-重复决定同一个审核任务会返回：
-
-```text
-409 Review task has already been decided
-```
-
----
-
-## 设计说明
-
-### 为什么 Webhook 不直接调用大模型
-
-LLM 和 GitHub API 都属于耗时、可能失败的外部服务。
-
-如果 Webhook 同步执行全部流程：
-
-```text
-GitHub 请求
-→ 等待 LLM
-→ 等待数据库
-→ 等待 GitHub API
-→ 才返回
-```
-
-会导致：
-
-- Webhook 响应时间过长；
-- 外部服务失败直接影响入口请求；
-- 难以记录任务状态；
-- 无法独立重试任务；
-- 并发请求容易占满后端连接。
-
-当前设计：
-
-```text
-Webhook
-→ 验签
-→ 去重
-→ 入库
-→ 投递 RQ
-→ 快速返回
-```
-
-耗时流程由 Worker 在后台执行。
-
-### 为什么 PostgreSQL 是事实来源
-
-Redis 适合队列调度，但不负责保存完整业务状态。
-
-以下内容全部保存在 PostgreSQL：
-
-- 原始 Webhook；
-- 标准化 Issue 事件；
-- Agent Run；
-- Agent 分析结果；
-- 审核状态；
-- GitHub 命令；
-- 错误信息；
-- 执行时间。
-
-### 为什么模型不直接调用 GitHub
-
-模型输出是不确定的，Issue 内容也是不可信的。
-
-因此执行链路被拆成：
-
-```text
-模型生成草案
-→ 程序校验动作类型
-→ 写入数据库
-→ 人工审核
-→ Worker 执行
-```
-
-即使模型生成了不合适的内容，也不能越过审核直接影响 GitHub。
-
-### 为什么使用数据库行锁
-
-两个请求可能同时批准同一审核任务。
-
-批准接口先执行：
-
-```sql
-SELECT id, status
-FROM review_tasks
-WHERE id = %s
-FOR UPDATE;
-```
-
-同一条审核记录在事务结束前只能被一个请求修改。
-
-### 唯一键分别解决什么问题
-
-```text
-webhook_deliveries.delivery_id
-→ 避免重复 Webhook 入库
-
-agent_runs.issue_event_id
-→ 避免同一事件创建多个 Agent Run
-
-github_commands.idempotency_key
-→ 避免同一 Agent 输出重复创建命令
-```
-
-这些约束不等同于严格的分布式 exactly-once。
-
----
-
-## 真实演示
-
-项目已经在真实 GitHub Issue 中完成以下流程：
-
-```text
-创建 Issue
-→ GitHub Webhook 到达本地
-→ Agent 判断为 bug
-→ 生成 bug 标签草案
-→ 生成补充信息回复草案
-→ 人工批准
-→ Worker 添加 bug 标签
-→ Worker 发布评论
-→ 数据库命令状态变为 executed
-```
-
-演示 Issue：
-
-[登录接口在密码错误时返回 500 #5](https://github.com/chengyebi/issueflow-agent/issues/5)
-
-该 Issue 页面可以看到：
-
-- 自动添加的 `bug` 标签；
-- Agent 生成并由人工批准的补充信息评论。
-
----
+检索与评测的验证则以冻结的 DEV/TEST 数据集为准（见 [检索评测](#检索评测)），不使用合成样例冒充真实效果。
 
 ## 当前边界
 
-当前版本已经完成核心 MVP，但尚未包含以下能力：
-
-- 历史 Issue 的语义查重；
-- RAG；
-- Embedding；
-- pgvector；
-- 关键词与向量混合检索；
-- LangGraph Checkpointer；
-- LangGraph `interrupt()` 暂停恢复；
-- 自动重试和指数退避；
-- 熔断与降级；
-- 长时间 `executing` 命令恢复；
-- GitHub 外部状态对账；
-- Agent 节点级 Trace；
-- Token 和成本统计；
-- 自动化 Eval；
-- Web 审核界面；
-- MCP Server；
-- Multi-Agent。
-
-上述内容属于后续增强，不属于当前已完成功能。
-
----
+- 审核鉴权是最小共享管理员 Token，不是 RBAC / OAuth / IAM，也不区分多用户角色；
+- 崩溃窗口下 GitHub 写操作不能保证 exactly-once，重复评论不自动重放，依赖人工对账；
+- 检索评测是 Retrieval Evaluation，**不宣称**查重分类准确率、Precision、F1 或 Agent 端到端准确率；
+- 未启用 cross-encoder 重排器；RAG 不发送 Issue 内容到外部 Embedding 服务；
+- 观测体系基于 PostgreSQL 持久化，未接入 OpenTelemetry / Prometheus / Grafana；
+- 未配置确认的模型单价时，成本指标保持 `null`；
+- 当前是工作流型 Agent（LangGraph workflow），不是多智能体，也没有 MCP / Kubernetes / Kafka 等设施；
+- 可对外引用的 Agent 指标需要独立人工标注集与 `--allow-external` 实测，README 不虚构生产流量、QPS、uptime 或 SLA。
 
 ## Roadmap
 
-### 第一阶段：仓库可复现
+- 一键 Smoke Test 与更完整的 Webhook / 审核回归用例，让新环境可复现验证；
+- 长文本与检索的进一步分析：在更长 Issue 上的 Chunk 配置、以及 Hybrid 排序质量为何低于纯 Vector 的归因；
+- 补全崩溃窗口下的外部状态对账与人工对账工具；
+- 明确模型单价配置，使成本指标从 `null` 变为可解释的估算；
+- 评估更细粒度的 Agent 指标（结构化输出成功率、延迟分布）并沉淀为可对外引用的报告。
 
-- [ ] 一键 Smoke Test
-- [ ] Webhook 单元测试
-- [ ] 重复 Delivery 测试
-- [ ] 高风险分支测试
-- [ ] approve / reject 测试
-- [ ] 新数据库卷初始化验证
-- [ ] GitHub Actions CI
+## 文档与评估产物
 
-### 第二阶段：可靠性
-
-- [ ] 区分可重试和不可重试错误
-- [ ] RQ 有限重试
-- [ ] 指数退避
-- [ ] LLM 超时预算
-- [ ] GitHub API 限流处理
-- [ ] 熔断与降级
-- [ ] 长时间 `executing` 命令恢复
-- [ ] GitHub 写回状态对账
-- [ ] 保存 GitHub Comment ID
-
-### 第三阶段：可观测性与评估
-
-- [ ] 为整条链路生成统一 `trace_id`
-- [ ] 新增 `agent_steps` 表
-- [ ] 记录每个节点的输入输出摘要
-- [ ] 记录节点耗时
-- [ ] 记录 Prompt 版本
-- [ ] 记录 Token 使用量
-- [ ] 估算单次运行成本
-- [ ] 建立 30～50 条人工标注 Issue 数据集
-- [ ] 统计分类准确率
-- [ ] 统计高风险召回率
-- [ ] 统计结构化输出成功率
-- [ ] 统计平均和 P95 延迟
-
-### 第四阶段：RAG 与历史 Issue 查重
-
-```mermaid
-flowchart LR
-    HISTORY["历史 Closed Issues"]
-    CLEAN["清洗与分块"]
-    EMB["Embedding"]
-    VECTOR[("pgvector")]
-    NEW["新 Issue"]
-    RETRIEVE["Top-K 检索"]
-    RERANK["重排"]
-    JUDGE["LLM 重复判断"]
-    RESULT["相似 Issue + 置信度 + 理由"]
-
-    HISTORY --> CLEAN --> EMB --> VECTOR
-    NEW --> RETRIEVE
-    VECTOR --> RETRIEVE
-    RETRIEVE --> RERANK --> JUDGE --> RESULT
-```
-
-计划包括：
-
-- [ ] 采集历史 Closed Issues
-- [ ] 文本清洗
-- [ ] Embedding
-- [ ] pgvector 索引
-- [ ] 关键词召回
-- [ ] 向量召回
-- [ ] 混合检索
-- [ ] Top-K 重排
-- [ ] 重复判断
-- [ ] 相似 Issue 链接和理由
-- [ ] Recall@K / MRR 评估
-
-### 第五阶段：Agent 扩展
-
-- [ ] LangGraph Postgres Checkpointer
-- [ ] `interrupt()` 人工中断与恢复
-- [ ] MCP Server
-- [ ] 暴露审核查询 Tool
-- [ ] 暴露 approve / reject Tool
-- [ ] 简单 Web 审核界面
-
----
-
-## 项目定位
-
-IssueFlow 当前属于工作流型 Agent。
-
-主要执行路径由代码预先定义：
-
-```text
-triage
-→ risk route
-→ draft / security review
-→ command proposal
-→ human review
-→ command execution
-```
-
-模型负责：
-
-- 理解 Issue；
-- 生成结构化分类；
-- 判断风险；
-- 生成摘要；
-- 生成回复；
-- 提出标签和评论草案。
-
-工程系统负责：
-
-- Webhook 接入；
-- 验签；
-- 去重；
-- 事务；
-- 异步队列；
-- 状态持久化；
-- 权限控制；
-- 人工审核；
-- 外部 API 调用；
-- 错误记录。
-
-项目目标不是构造一个不受控制的通用智能体，而是实现一条真实、可审核、可追踪的 GitHub Issue 自动化处理流程。
-
----
-
-## 参考资料
-
-- [GitHub：Validating webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
-- [GitHub：Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
-- [GitHub REST API：Issue labels](https://docs.github.com/en/rest/issues/labels)
-- [GitHub REST API：Issue comments](https://docs.github.com/en/rest/issues/comments)
-- [LangGraph Overview](https://docs.langchain.com/oss/python/langgraph/overview)
-- [LangGraph Workflows and Agents](https://docs.langchain.com/oss/python/langgraph/workflows-agents)
-- [RQ Documentation](https://python-rq.org/docs/)
-- [Smee](https://smee.io/)
+- [历史 Issue 混合检索与查重](docs/rag.md)
+- [查重检索评测方法](docs/rag-evaluation-methodology.md)
+- [查重评测的数据泄漏边界](docs/rag-data-leakage.md)
+- [长文本 Issue 检索策略](docs/rag-long-document-strategy.md)
+- [任务投递与恢复](docs/reliability.md)
+- [检索评测报告与数据集说明](eval/README.md)
+- 评估产物：`eval/reports/rag_baseline_dev.json`、`eval/reports/rag_dev.json`、`eval/reports/rag_frozen_config.json`、`eval/reports/rag_primary_method.json`、`eval/reports/rag_test.json`
+- 数据集：`eval/datasets/duplicate_qrels_dev.jsonl`、`eval/datasets/duplicate_qrels_test.jsonl`、`eval/datasets/duplicate_clusters.json`、`eval/datasets/repository_snapshots.json`

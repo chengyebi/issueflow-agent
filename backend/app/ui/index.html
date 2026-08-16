@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'"
+    />
+    <meta
+      name="description"
+      content="IssueFlow Agent human-in-the-loop review console"
+    />
+    <title>IssueFlow Review Console</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="/ui/" aria-label="IssueFlow Review Console 首页">
+          <span class="brand-mark" aria-hidden="true">IF</span>
+          <span>
+            <strong>IssueFlow</strong>
+            <small>Review Console</small>
+          </span>
+        </a>
+
+        <nav class="topbar-actions" aria-label="辅助链接">
+          <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+          <a href="/health" target="_blank" rel="noreferrer">Health</a>
+          <button
+            id="lock-button"
+            class="lock-button"
+            type="button"
+            hidden
+          >
+            锁定审核台
+          </button>
+          <span id="system-status" class="system-status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="system-status-label">正在连接</span>
+          </span>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="page-title">
+          <div>
+            <p class="eyebrow">Human-in-the-loop operations</p>
+            <h1 id="page-title">审核 Agent 提议，再安全写回 GitHub</h1>
+            <p class="hero-description">
+              在一个界面中查看 Issue 上下文、模型判断、相似 Issue 和待执行命令。
+              所有外部写操作都必须经过维护者批准。
+            </p>
+          </div>
+
+          <div class="hero-actions">
+            <button id="refresh-button" class="primary-button" type="button">
+              刷新状态
+            </button>
+            <p id="last-updated" class="last-updated" aria-live="polite">
+              尚未刷新
+            </p>
+          </div>
+        </section>
+
+        <section class="metrics-grid" aria-label="审核任务统计">
+          <article class="metric-card">
+            <span>待审核</span>
+            <strong id="pending-count">—</strong>
+            <small>Pending reviews</small>
+          </article>
+          <article class="metric-card">
+            <span>已批准</span>
+            <strong id="approved-count">—</strong>
+            <small>Approved reviews</small>
+          </article>
+          <article class="metric-card">
+            <span>已拒绝</span>
+            <strong id="rejected-count">—</strong>
+            <small>Rejected reviews</small>
+          </article>
+          <article class="metric-card">
+            <span>执行失败</span>
+            <strong id="failed-count">—</strong>
+            <small>Failed commands</small>
+          </article>
+        </section>
+
+        <section class="workspace" aria-label="审核工作区">
+          <aside class="queue-panel">
+            <div class="panel-header">
+              <div>
+                <p class="panel-kicker">Review queue</p>
+                <h2>审核任务</h2>
+              </div>
+
+              <div class="filter-tabs" aria-label="任务状态筛选">
+                <button
+                  class="filter-tab is-active"
+                  type="button"
+                  data-status="pending"
+                  aria-pressed="true"
+                >
+                  待审核
+                </button>
+                <button
+                  class="filter-tab"
+                  type="button"
+                  data-status="approved"
+                  aria-pressed="false"
+                >
+                  已批准
+                </button>
+                <button
+                  class="filter-tab"
+                  type="button"
+                  data-status="rejected"
+                  aria-pressed="false"
+                >
+                  已拒绝
+                </button>
+              </div>
+            </div>
+
+            <div
+              id="review-list"
+              class="review-list"
+              aria-live="polite"
+              aria-busy="true"
+            >
+              <div class="loading-state">
+                <span class="loading-spinner" aria-hidden="true"></span>
+                <p>正在读取审核任务……</p>
+              </div>
+            </div>
+          </aside>
+
+          <section id="detail-panel" class="detail-panel" aria-live="polite">
+            <div class="empty-state">
+              <div class="empty-icon large" aria-hidden="true">◇</div>
+              <p class="panel-kicker">Review details</p>
+              <h2>选择一条任务查看 Agent 提议</h2>
+              <p>
+                这里会展示原始 Issue、风险等级、分类结果、重复判断、
+                相似 Issue、标签草案、评论草案和命令状态。
+              </p>
+
+              <div class="flow-preview" aria-label="工作流预览">
+                <span>Issue</span>
+                <b aria-hidden="true">→</b>
+                <span>Agent draft</span>
+                <b aria-hidden="true">→</b>
+                <span>Human review</span>
+                <b aria-hidden="true">→</b>
+                <span>GitHub command</span>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <div
+          id="notification"
+          class="notification"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
+      </main>
+
+      <footer class="footer">
+        <span>IssueFlow Agent</span>
+        <span>模型负责建议 · 程序负责约束 · 人工负责批准</span>
+      </footer>
+    </div>
+
+    <dialog
+      id="unlock-dialog"
+      class="unlock-dialog"
+      aria-labelledby="unlock-title"
+      aria-describedby="unlock-description"
+    >
+      <form id="unlock-form" class="unlock-form">
+        <div class="unlock-mark" aria-hidden="true">IF</div>
+
+        <div>
+          <p class="panel-kicker">Protected review console</p>
+          <h2 id="unlock-title">解锁 IssueFlow 审核台</h2>
+          <p id="unlock-description" class="unlock-description">
+            审核任务包含 Issue 内容、Agent 判断和待执行命令。
+            请输入管理员 Token 后才能读取或提交审核决策。
+          </p>
+        </div>
+
+        <div class="unlock-field">
+          <label for="review-admin-token">管理员 Token</label>
+          <input
+            id="review-admin-token"
+            class="unlock-input"
+            name="review_admin_token"
+            type="password"
+            required
+            maxlength="1024"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            placeholder="输入 REVIEW_ADMIN_TOKEN"
+          />
+          <small>
+            Token 不会进入 URL，只用于同源审核 API 请求。
+          </small>
+        </div>
+
+        <p
+          id="unlock-error"
+          class="unlock-error"
+          role="alert"
+          aria-live="assertive"
+          hidden
+        ></p>
+
+        <button
+          id="unlock-button"
+          class="unlock-button"
+          type="submit"
+        >
+          解锁审核台
+        </button>
+
+        <p class="unlock-storage-note">
+          解锁后 Token 仅保存在当前浏览器页面会话中。
+          你可以随时点击“锁定审核台”立即清除。
+        </p>
+      </form>
+    </dialog>
+  </body>
+</html>

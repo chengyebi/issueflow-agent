@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "decision_stage": "pre_test",
+  "source_commit": "1c1c3cd5fbb86a991f72b3f3f327c2a08ec0fa9b",
+  "dev_dataset_sha256": "e575135790d68125214d4a242b93d5ca6a661642b0768342235f1fc93258ccf5",
+  "baseline_artifact_sha256": "b6d4a3493aea851a178d2fbf5834b626a463ecd1df57fb3c4887653dfe05ecd5",
+  "dev_report_sha256": "90455ed272a72720d2943dcd15ba7d27283ef1ee2b4fff00293eff47dfcb385a",
+  "frozen_config_sha256": "194cf796449e6d00638d13bc0470a02b96f30e0791827da5a3ae869ebb77179d",
+  "selection_rule": {
+    "primary": "macro_ndcg_at_10",
+    "secondary": "macro_mrr_at_10",
+    "tertiary": "macro_recall_at_5"
+  },
+  "primary_method": "vector_chunked",
+  "runner_up_method": "vector_head512",
+  "selected_dev_config": {
+    "prefix_name": "bge_retrieval",
+    "query_prefix": "Represent this sentence for searching relevant passages: ",
+    "chunk_aggregation": "max_chunk_score",
+    "selection_metric": "macro_ndcg_at_10",
+    "selection_score": 0.5311541158099536
+  },
+  "primary_dev_metrics": {
+    "macro_ndcg_at_10": 0.5892504271572442,
+    "macro_mrr_at_10": 0.5735491662770765,
+    "macro_recall_at_5": 0.6175042854916627
+  },
+  "runner_up_dev_metrics": {
+    "macro_ndcg_at_10": 0.5434807809848116,
+    "macro_mrr_at_10": 0.5281943795127525,
+    "macro_recall_at_5": 0.6062724014336918
+  },
+  "method_ranking": [
+    "vector_chunked",
+    "vector_head512",
+    "hybrid_chunked_rrf",
+    "hybrid_head512_rrf",
+    "lexical"
+  ],
+  "test_observed_at_decision_time": false,
+  "notes": [
+    "primary retrieval method was frozen before observing the held-out TEST split, per the pre-declared DEV ranking rule (macro nDCG@10, then macro MRR@10, then macro Recall@5).",
+    "under the selected DEV config, BGE prefix vs the second-place tuning trial shows a macro nDCG@10 point-estimate gain of approximately 0.0094 (modest gain).",
+    "no claim of statistical significance is made for the 0.0094 difference; no paired-delta significance test has been run.",
+    "vector_chunked ranks first under the selected DEV config among the five methods.",
+    "TEST results, good or bad, must not be used to re-select the primary retrieval method."
+  ]
+}

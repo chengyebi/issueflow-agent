@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
     github_api_version: str = "2022-11-28"
     github_write_enabled: bool = True
+    review_admin_token: SecretStr | None = None
 
     llm_api_key: SecretStr | None = None
     llm_base_url: str | None = None
