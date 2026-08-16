@@ -132,13 +132,20 @@ def decide_automation(
         )
 
     # 6. 逐个动作检查策略规则，fail closed。
+    #    AUTO_EXECUTE 必须同时满足：rule 存在、enabled=True、allow_auto=True
+    #    （即 is_auto_enabled）、confidence 阈值、evidence 要求。
     for action in actions:
         rule = (
             calibrated_policy.rule_for(action.intent)
             if calibrated_policy is not None
             else None
         )
-        if rule is None or not rule.enabled:
+        auto_enabled = (
+            calibrated_policy.is_auto_enabled(action.intent)
+            if calibrated_policy is not None
+            else False
+        )
+        if rule is None or not auto_enabled:
             return AutomationDecision(
                 disposition=AutomationDisposition.DEFER,
                 policy_version=_policy_version(calibrated_policy),

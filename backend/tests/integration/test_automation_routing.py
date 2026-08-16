@@ -133,11 +133,15 @@ def _enable_policy_add_label(monkeypatch, tmp_path):
                 "policy_version": "itest-v1",
                 "created_at": "2026-01-01T00:00:00Z",
                 "source_dataset_hash": "hash",
+                "prediction_artifact_hash": "itest-pred-hash",
                 "rules": {
                     "add_category_label": {
                         "enabled": True,
                         "min_model_confidence": 0.80,
                         "require_evidence": True,
+                        "observed_precision": 0.9,
+                        "coverage": 0.5,
+                        "sample_count": 100,
                         "allow_auto": True,
                     },
                     "request_missing_information": {
@@ -550,6 +554,83 @@ def test_legacy_data_backfilled_as_human_authorized(monkeypatch):
             cmd = cur.fetchone()
             assert cmd["authorization_source"] == "human"
             assert is_command_authorized(cmd) is True
+    finally:
+        _delete_agent_run(agent_run_id)
+
+
+def test_policy_route_idempotent_no_duplicate_side_effect(monkeypatch, tmp_path):
+    """同一 agent_run 路由两次：不产生第二条 command、不重复 outbox 副作用。"""
+    _enable_policy_add_label(monkeypatch, tmp_path)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "automation_mode", "enforce")
+
+    agent_run_id = _insert_agent_run("owner/repo", 12360)
+    try:
+        first = save_completed_run_and_route(
+            agent_run_id,
+            _result(proposed_actions=[_label_action()]),
+            duration_ms=1,
+            trace=_FakeTrace(),
+            estimated_cost_usd=None,
+        )
+        second = save_completed_run_and_route(
+            agent_run_id,
+            _result(proposed_actions=[_label_action()]),
+            duration_ms=1,
+            trace=_FakeTrace(),
+            estimated_cost_usd=None,
+        )
+        # 返回相同 command id。
+        assert first.command_ids == second.command_ids
+        assert len(first.command_ids) == 1
+
+        with connect(row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM github_commands WHERE agent_run_id = %s",
+                (agent_run_id,),
+            )
+            assert cur.fetchone()["n"] == 1
+            # outbox 事件幂等：不重复。
+            cur.execute(
+                """
+                SELECT count(*) AS n FROM outbox_events
+                WHERE event_key = %s
+                """,
+                (f"github-commands:{agent_run_id}",),
+            )
+            assert cur.fetchone()["n"] == 1
+    finally:
+        _delete_agent_run(agent_run_id)
+
+
+def test_human_route_idempotent(monkeypatch):
+    """human 路径同一 run 路由两次：不创建第二条 command。"""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "automation_mode", "off")
+
+    agent_run_id = _insert_agent_run("owner/repo", 12361)
+    try:
+        first = save_completed_run_and_route(
+            agent_run_id,
+            _result(proposed_actions=[_label_action()]),
+            duration_ms=1,
+            trace=_FakeTrace(),
+            estimated_cost_usd=None,
+        )
+        second = save_completed_run_and_route(
+            agent_run_id,
+            _result(proposed_actions=[_label_action()]),
+            duration_ms=1,
+            trace=_FakeTrace(),
+            estimated_cost_usd=None,
+        )
+        assert first.command_ids == second.command_ids
+        with connect(row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM github_commands WHERE agent_run_id = %s",
+                (agent_run_id,),
+            )
+            assert cur.fetchone()["n"] == 1
     finally:
         _delete_agent_run(agent_run_id)
 

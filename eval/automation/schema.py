@@ -32,6 +32,7 @@ class GroundTruthItem(BaseModel):
     body: str = ""
     category: str  # bug | feature | question | documentation
     source_labels: list[str] = Field(default_factory=list)
+    state: str = "open"
     github_created_at: str = ""
 
 

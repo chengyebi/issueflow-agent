@@ -1,42 +1,38 @@
-"""在 DEV 上选择 policy 阈值并冻结 artifact。
+"""在 DEV 上扫描阈值并冻结 policy artifact（Stage 2 的阈值选择）。
 
-- 只读取 DEV 数据集，禁止读取 TEST（阈值冻结前不得查看）。
-- 扫描置信度阈值，选择满足“错误自动执行数最小”且覆盖率最高的阈值。
-- 输出冻结的 policy.json（含 observed_precision / coverage / sample_count）。
-- 真实 calibration 需要人工标注或可信 ground truth；本工具在
-  DEV ground truth 上估计精度，作为生产 artifact 的候选，需人工复核后启用。
+原则（P0-6 / P0-7）：
+- 只读取一份冻结的 prediction artifact（predictions.jsonl），
+  在完全相同的 prediction 上扫描所有 threshold，不重复调用模型。
+- 不要求 error_count == 0（小样本下 0 error 不等于可靠）；
+  同时输出 sample_count 与 precision Wilson CI lower bound。
+- 不自行声称行业阈值。
+- 正式 freeze 时：
+    source_dataset_hash 必须来自 dataset manifest 的 SHA-256（不能为空）；
+    prediction_artifact_hash / model_name / prompt_version / created_at / sample_count
+    必须写入 policy artifact；
+    enabled intent 必须有 observed_precision（非 null）、sample_count > 0、allow_auto=true。
+- heuristic_smoke 的 prediction artifact 不能用于 production freeze。
+
+策略选择：不自动选择单个阈值输出为“正式策略”，而是输出完整 precision-coverage
+曲线，由人工在满足产品精度门槛的前提下选择。默认输出 frozen 候选 artifact，
+但 marked 为 heuristic_smoke 来源，不能直接用于 enforce。
 """
 
 import argparse
 import json
 from pathlib import Path
 
-from app.automation.policy_loader import ALL_INTENTS
-from run_automation_eval import run_eval
+from app.automation.models import ActionIntent
+from app.automation.policy_loader import ALL_INTENTS, POLICY_SCHEMA_VERSION
+from run_automation_eval import _wilson_ci, run_eval
 
-THRESHOLD_CANDIDATES = [0.0, 0.70, 0.80, 0.90, 0.95]
+THRESHOLD_CANDIDATES = [0.0, 0.70, 0.80, 0.90, 0.95, 0.99]
 
-
-def select_threshold(dataset_path: Path) -> dict:
-    """返回每个候选阈值的 {coverage, error_count, precision}。"""
-    results = {}
-    for threshold in THRESHOLD_CANDIDATES:
-        policy_file = _temporary_policy(threshold)
-        try:
-            report = run_eval(dataset_path, policy_file)
-        finally:
-            pass
-        results[str(threshold)] = {
-            "automation_coverage": report["automation_coverage"],
-            "error_auto_execute_count": report["error_auto_execute_count"],
-            "auto_action_precision": report["auto_action_precision"],
-            "auto_execute_count": report["auto_execute_count"],
-        }
-    return results
+# 用于 smoke：临时 policy 只放开 add_category_label。
+SMOKE_ALLOWED_INTENT = ActionIntent.ADD_CATEGORY_LABEL.value
 
 
 def _temporary_policy(threshold: float) -> Path:
-    """生成临时 policy：仅 add_category_label 允许自动执行。"""
     import tempfile
 
     rules = {}
@@ -48,13 +44,13 @@ def _temporary_policy(threshold: float) -> Path:
             "observed_precision": None,
             "coverage": None,
             "sample_count": 0,
-            "allow_auto": True if intent.value == "add_category_label" else False,
+            "allow_auto": intent.value == SMOKE_ALLOWED_INTENT,
         }
     data = {
-        "schema_version": "1.0",
-        "policy_version": f"threshold-{threshold}",
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "policy_version": f"threshold-scan-{threshold}",
         "created_at": "2026-08-17T00:00:00Z",
-        "source_dataset_hash": "",
+        "source_dataset_hash": "scan-temporary",
         "rules": rules,
     }
     tmp = Path(tempfile.gettempdir()) / f"policy-t{threshold}.json"
@@ -62,73 +58,143 @@ def _temporary_policy(threshold: float) -> Path:
     return tmp
 
 
-def freeze_best(dataset_path: Path, out_path: Path) -> None:
-    """在 DEV 上选最佳阈值并冻结 artifact。"""
-    results = select_threshold(dataset_path)
+def _read_dataset_hash(manifest_path: Path) -> str:
+    """从 dataset manifest 读取真实 SHA-256。"""
+    if not manifest_path.exists():
+        return ""
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return data.get("dataset_hash", "")
 
-    # 选择：错误自动执行数为 0 的前提下，覆盖率最高。
-    feasible = [
-        (t, r) for t, r in results.items() if r["error_auto_execute_count"] == 0
-    ]
-    if not feasible:
-        # 全部阈值都有错误时，选错误最少、覆盖率最高。
-        feasible = sorted(
-            results.items(),
-            key=lambda kv: (kv[1]["error_auto_execute_count"], -kv[1]["automation_coverage"]),
+
+def scan_thresholds(predictions_path: Path, dataset_manifest: Path) -> list[dict]:
+    """在同一份 prediction artifact 上扫描全部候选阈值。"""
+    results = []
+    for threshold in THRESHOLD_CANDIDATES:
+        policy_file = _temporary_policy(threshold)
+        report = run_eval(predictions_path, policy_file)
+        auto_total = report["auto_execute_count"]
+        correct = report["auto_execute_count"] - report["error_auto_execute_count"]
+        lower, upper = _wilson_ci(correct, auto_total)
+        results.append(
+            {
+                "threshold": threshold,
+                "auto_count": auto_total,
+                "coverage": report["automation_coverage"],
+                "correct": correct,
+                "incorrect": report["error_auto_execute_count"],
+                "precision": report["auto_action_precision"],
+                "precision_ci_lower": round(lower, 4),
+                "precision_ci_upper": round(upper, 4),
+                "sample_count": auto_total,
+            }
         )
-        best = feasible[0]
-    else:
-        best = max(feasible, key=lambda kv: kv[1]["automation_coverage"])
+    return results
 
-    threshold = float(best[0])
-    best_metrics = best[1]
+
+def freeze_candidate(
+    predictions_path: Path,
+    dataset_manifest: Path,
+    out_path: Path,
+    *,
+    selected_threshold: float,
+) -> dict:
+    """从一份 prediction artifact + 真实 dataset hash 生成冻结候选。
+
+    仅当 artifact 是 production-compatible（非 heuristic_smoke）时才允许
+    标记为可 enforce 的冻结策略；heuristic_smoke 只能生成候选，不允许 enforce。
+    """
+    # 读取 prediction artifact 元数据。
+    lines = [ln for ln in predictions_path.read_text().splitlines() if ln.strip()]
+    predictions = [json.loads(ln) for ln in lines]
+    if not predictions:
+        raise RuntimeError("prediction artifact 为空")
+    runner_type = predictions[0].get("runner_type", "")
+    # artifact hash = 文件内容 SHA-256（与 generate_predictions 返回一致）。
+    import hashlib
+
+    artifact_hash_payload = predictions_path.read_bytes()
+    prediction_artifact_hash = hashlib.sha256(artifact_hash_payload).hexdigest()
+
+    dataset_hash = _read_dataset_hash(dataset_manifest)
+    if not dataset_hash:
+        raise RuntimeError(
+            "dataset manifest 缺失 dataset_hash：不能冻结正式 policy"
+        )
+
+    # 在选定阈值上重跑一次得到指标。
+    policy_file = _temporary_policy(selected_threshold)
+    report = run_eval(predictions_path, policy_file)
+    auto_total = report["auto_execute_count"]
+    correct = auto_total - report["error_auto_execute_count"]
+
+    # 仅 production-compatible artifact 允许 enforce。
+    enforce_allowed = runner_type != "heuristic_smoke" and bool(prediction_artifact_hash)
 
     rules = {}
     for intent in ALL_INTENTS:
-        enabled = intent.value == "add_category_label" and threshold >= 0.0
+        is_label = intent.value == SMOKE_ALLOWED_INTENT
         rules[intent.value] = {
-            "enabled": enabled,
-            "min_model_confidence": threshold if enabled else 1.0,
+            "enabled": is_label and enforce_allowed,
+            "min_model_confidence": selected_threshold if (is_label and enforce_allowed) else 1.0,
             "require_evidence": True,
             "observed_precision": (
-                best_metrics["auto_action_precision"] if enabled else None
+                round(correct / auto_total, 4) if (is_label and enforce_allowed and auto_total) else None
             ),
             "coverage": (
-                best_metrics["automation_coverage"] if enabled else None
+                report["automation_coverage"] if (is_label and enforce_allowed) else None
             ),
-            "sample_count": best_metrics["auto_execute_count"] if enabled else 0,
-            "allow_auto": enabled,
+            "sample_count": auto_total if (is_label and enforce_allowed) else 0,
+            "allow_auto": is_label and enforce_allowed,
         }
 
     data = {
-        "schema_version": "1.0",
-        "policy_version": "2026-08-17-frozen-from-dev",
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "policy_version": "2026-08-17-frozen-candidate",
         "created_at": "2026-08-17T00:00:00Z",
-        "source_dataset_hash": "",
-        "model_name": "deterministic-heuristic",
-        "prompt_version": "n/a",
+        "source_dataset_hash": dataset_hash,
+        "prediction_artifact_hash": prediction_artifact_hash,
+        "model_name": predictions[0].get("model_name"),
+        "prompt_version": predictions[0].get("prompt_version"),
+        "runner_type": runner_type,
+        "sample_count": auto_total,
+        "enforce_ready": enforce_allowed,
         "rules": rules,
-        "threshold_scan": results,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"冻结策略写入: {out_path}")
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return data
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="在 DEV 上选择并冻结 policy 阈值")
+    parser = argparse.ArgumentParser(description="扫描阈值并生成冻结候选")
     parser.add_argument(
-        "--dataset",
+        "--predictions",
         type=Path,
-        default=Path("eval/automation/label_ground_truth_dev.jsonl"),
+        default=Path("eval/automation/predictions/predictions_dev.jsonl"),
     )
-    parser.add_argument("--out", type=Path, default=Path("eval/automation/policy.frozen.json"))
+    parser.add_argument(
+        "--dataset-manifest",
+        type=Path,
+        default=Path("eval/automation/label_ground_truth_dev.manifest.json"),
+    )
+    parser.add_argument(
+        "--out", type=Path, default=Path("eval/automation/policy.frozen.json")
+    )
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="人工选定阈值；缺省仅输出扫描曲线")
     args = parser.parse_args()
 
-    freeze_best(args.dataset, args.out)
+    curve = scan_thresholds(args.predictions, args.dataset_manifest)
+    print(json.dumps({"threshold_curve": curve}, ensure_ascii=False, indent=2))
+
+    if args.threshold is not None:
+        frozen = freeze_candidate(
+            args.predictions, args.dataset_manifest, args.out,
+            selected_threshold=args.threshold,
+        )
+        print(json.dumps(frozen, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

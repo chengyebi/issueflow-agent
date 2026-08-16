@@ -8,7 +8,6 @@ artifact 是经过离线评测冻结的 JSON，形如 eval/automation/policy.jso
 
 import json
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -41,6 +40,7 @@ class CalibratedPolicy(BaseModel):
     policy_version: str
     created_at: str
     source_dataset_hash: str
+    prediction_artifact_hash: str | None = None
     model_name: str | None = None
     prompt_version: str | None = None
     rules: dict[str, RuleConfig]
@@ -52,6 +52,49 @@ class CalibratedPolicy(BaseModel):
     def is_auto_enabled(self, intent: ActionIntent | str) -> bool:
         rule = self.rule_for(intent)
         return bool(rule and rule.enabled and rule.allow_auto)
+
+    def auto_enabled_intents(self) -> list[str]:
+        return [
+            intent.value
+            for intent in ALL_INTENTS
+            if self.is_auto_enabled(intent)
+        ]
+
+    def validate_for_enforce(self) -> None:
+        """enforce 模式下的完整性校验（P0-7），任何失败都应 fail closed。
+
+        要求：
+        - source_dataset_hash 非空（正式策略必须来自可复现数据集）
+        - 任一 enabled+allow_auto 的 intent 必须：
+            observed_precision 非 null
+            sample_count > 0
+            prediction_artifact_hash 非空
+        - 若存在 enable 的 intent 但缺 prediction_artifact_hash，直接拒绝。
+        """
+        if not self.source_dataset_hash:
+            raise PolicyLoaderError(
+                "enforce 模式拒绝：source_dataset_hash 为空，"
+                "策略未绑定可复现数据集"
+            )
+        enabled = self.auto_enabled_intents()
+        if not enabled:
+            # 无自动 intent 的策略是安全的（全 disabled），允许。
+            return
+        if not self.prediction_artifact_hash:
+            raise PolicyLoaderError(
+                "enforce 模式拒绝：存在已启用自动执行的 intent，"
+                "但缺少 prediction_artifact_hash"
+            )
+        for intent_key in enabled:
+            rule = self.rules[intent_key]
+            if rule.observed_precision is None:
+                raise PolicyLoaderError(
+                    f"enforce 模式拒绝：intent {intent_key} 的 observed_precision 为 null"
+                )
+            if rule.sample_count == 0:
+                raise PolicyLoaderError(
+                    f"enforce 模式拒绝：intent {intent_key} 的 sample_count 为 0"
+                )
 
 
 class PolicyLoaderError(RuntimeError):
@@ -86,11 +129,13 @@ def load_calibrated_policy(
     path: Path | None = None,
     *,
     policy_version: str | None = None,
+    for_enforce: bool = False,
 ) -> CalibratedPolicy:
     """加载并校验冻结策略。
 
     若文件不存在且给了 policy_version，返回全 disabled 的初始策略；
     否则抛 PolicyLoaderError（fail closed）。
+    for_enforce=True 时额外执行 enforce 完整性校验（P0-7）。
     """
     if path is None:
         path = _default_policy_path()
@@ -117,6 +162,9 @@ def load_calibrated_policy(
     except ValidationError as exc:
         raise PolicyLoaderError(f"策略 artifact 校验失败: {exc}") from exc
 
+    if for_enforce:
+        policy.validate_for_enforce()
+
     return policy
 
 
@@ -135,7 +183,3 @@ def list_auto_enabled_intents(policy: CalibratedPolicy) -> list[str]:
 
 def policy_to_dict(policy: CalibratedPolicy) -> dict:
     return policy.model_dump(mode="json")
-
-
-def _disabled_reason() -> Literal[""]:
-    return ""

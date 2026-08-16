@@ -1,22 +1,28 @@
-"""运行自动化评测：把确定性启发式分类结果喂给 Policy Gate，计算覆盖率/精度。
+"""运行自动化评测（Stage 2）：把冻结 prediction artifact 喂给 Policy Gate。
 
-设计：
-- runner 默认使用确定性启发式分类器（不调用付费 LLM），避免烧 API 额度。
-- 产物与 production Policy Gate 完全一致：同一个 decide_automation 决策链。
-- 指标：
+原则（P0-1 / P0-2 / P0-3）：
+- 只读取 predictions.jsonl（Stage 1 产物），绝不在这里做预测，也不读 ground truth。
+- 每个 case 区分三个概念：
+    true_category      来自 artifact（仅用于 metric 比较）
+    predicted_category 来自 artifact（作为预测）
+    prediction_confidence 来自 artifact（不作为 production 可信度）
+- 只允许 smoke runner 的 artifact 走评测框架验证；production threshold 需要
+  production-compatible prediction artifact，且必须有 prediction_artifact_hash。
+- 删除随机 confidence：raw_confidence 全部来自 artifact。
+
+指标：
     eligible_count / auto_execute_count / defer_count / no_action_count
-    automation_coverage（auto_execute / eligible）
-    human_touch_rate（defer / eligible）
-    auto_action_precision（auto 动作中预测分类正确比例）+ 置信区间
+    automation_coverage / human_touch_rate
+    auto_action_precision + Wilson CI
     error_auto_execute_count
     按 intent / repo / confidence bucket 的 precision 与 coverage
     defer reason distribution
 """
 
 import argparse
+import hashlib
 import json
 import math
-import random
 from pathlib import Path
 
 from app.automation.models import (
@@ -33,50 +39,32 @@ ALLOWED_AUTO_INTENTS = {ActionIntent.ADD_CATEGORY_LABEL}
 
 
 class _EvalResult:
-    def __init__(self, repo, issue_number, category, actions):
+    """把 artifact 记录包装成 decide_automation 需要的鸭子类型。
+
+    predicted_category 作为唯一预测来源，绝不使用 true_category。
+    """
+
+    def __init__(self, repo, issue_number, predicted_category, actions):
         self.repo = repo
         self.issue_number = issue_number
-        self.category = category
+        # 注意：这里填的是预测分类，只用于构建动作。
+        self.category = predicted_category
         self.risk_level = "low"
         self.retrieval_degraded = False
         self.duplicate_assessment = None
         self.proposed_actions = actions
 
 
-def _heuristic_category(repo: str, issue_number: int, title: str, body: str) -> str:
-    """低成本的确定性启发式分类，用于离线评测 Policy Gate 行为。
-
-    注意：这不是生产分类器，只是评测工具的一部分；
-    真实生产 Agent 的 triage 由 workflow 的 LLM 完成。
-    """
-    text = (title + "\n" + body).lower()
-    bug_markers = ("bug", "crash", "error", "exception", "failed", "失败", "异常", "崩溃")
-    question_markers = ("how do i", "how to", "how can", "what is", "为什么", "怎么", "请问")
-    documentation_markers = ("docs", "documentation", "document", "readme", "文档", "文档更新")
-    feature_markers = ("feature", "request", "enhancement", "支持", "新增", "功能")
-
-    score = {
-        "bug": sum(1 for m in bug_markers if m in text),
-        "question": sum(1 for m in question_markers if m in text),
-        "documentation": sum(1 for m in documentation_markers if m in text),
-        "feature": sum(1 for m in feature_markers if m in text),
-    }
-    best = max(score, key=score.get)
-    if score[best] == 0:
-        return "other"
-    return best
-
-
-def _build_action(category: str, confidence: float) -> AutomationAction | None:
-    if category not in ("bug", "feature", "question", "documentation"):
+def _build_action(predicted_category: str, confidence: float) -> AutomationAction | None:
+    if predicted_category not in ("bug", "feature", "question", "documentation"):
         return None
     return AutomationAction(
         type="add_label",
-        value=category,
+        value=predicted_category,
         intent=ActionIntent.ADD_CATEGORY_LABEL,
         confidence=confidence,
-        rationale=f"启发式分诊为 {category}",
-        evidence=[f"分类：{category}"],
+        rationale=f"预测分诊为 {predicted_category}",
+        evidence=[f"分类：{predicted_category}"],
     )
 
 
@@ -100,23 +88,25 @@ def _confidence_bucket(confidence: float) -> str:
     return "0.00-0.70"
 
 
-def run_eval(
-    dataset_path: Path,
-    policy_path: Path,
-    *,
-    seed: int = 42,
-) -> dict:
-    policy: CalibratedPolicy = load_calibrated_policy(policy_path)
-
-    cases = []
-    with dataset_path.open("r", encoding="utf-8") as f:
+def _read_predictions(path: Path) -> tuple[list[dict], str]:
+    predictions = []
+    raw_lines = []
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            cases.append(json.loads(line))
+            raw_lines.append(line)
+            predictions.append(json.loads(line))
+    artifact_hash = hashlib.sha256(
+        ("\n".join(raw_lines) + "\n").encode("utf-8")
+    ).hexdigest()
+    return predictions, artifact_hash
 
-    rng = random.Random(seed)
+
+def run_eval(predictions_path: Path, policy_path: Path) -> dict:
+    policy: CalibratedPolicy = load_calibrated_policy(policy_path)
+    predictions, artifact_hash = _read_predictions(predictions_path)
 
     auto_count = 0
     defer_count = 0
@@ -131,16 +121,15 @@ def run_eval(
     defer_reasons: dict[str, int] = {}
     sample_auto: list[dict] = []
 
-    for case in cases:
-        category = case["category"]
-        confidence = 0.7 + 0.3 * rng.random()
-        action = _build_action(category, confidence)
+    for case in predictions:
+        true_category = case["true_category"]
+        predicted_category = case["predicted_category"]
+        prediction_confidence = case.get("raw_confidence", 1.0)
 
+        # 预测动作只基于 predicted_category。
+        action = _build_action(predicted_category, prediction_confidence)
         result = _EvalResult(
-            case["repo"],
-            case["issue_number"],
-            category,
-            [action] if action else [],
+            case["repo"], case["issue_number"], predicted_category, [action] if action else []
         )
         decision: AutomationDecision = decide_automation(
             result, mode="enforce", calibrated_policy=policy
@@ -149,9 +138,9 @@ def run_eval(
         disposition = decision.disposition
         if disposition == AutomationDisposition.AUTO_EXECUTE:
             auto_count += 1
-            predicted = decision.actions[0].value if decision.actions else None
             auto_total += 1
-            if predicted == category:
+            # P0-1：唯一比较点，predicted vs true。
+            if predicted_category == true_category:
                 auto_correct += 1
             else:
                 error_auto_count += 1
@@ -159,13 +148,13 @@ def run_eval(
                 {
                     "repo": case["repo"],
                     "issue_number": case["issue_number"],
-                    "true_category": category,
-                    "predicted": predicted,
-                    "confidence": decision.actions[0].confidence,
+                    "true_category": true_category,
+                    "predicted_category": predicted_category,
+                    "confidence": prediction_confidence,
                 }
             )
-            bucket = _confidence_bucket(decision.actions[0].confidence)
-            _bump(by_bucket, bucket, category, predicted)
+            bucket = _confidence_bucket(prediction_confidence)
+            _bump(by_bucket, bucket, true_category, predicted_category)
         elif disposition == AutomationDisposition.DEFER:
             defer_count += 1
             reason_code = (
@@ -177,13 +166,12 @@ def run_eval(
         else:
             no_action_count += 1
 
-        # 按 intent / repo 统计（仅统计 auto 尝试）。
         if decision.actions:
             intent = decision.actions[0].intent.value
-            _bump(by_intent, intent, category, decision.actions[0].value)
-            _bump(by_repo, case["repo"], category, decision.actions[0].value)
+            _bump(by_intent, intent, true_category, predicted_category)
+            _bump(by_repo, case["repo"], true_category, predicted_category)
 
-    eligible = len(cases)
+    eligible = len(predictions)
     coverage = auto_count / eligible if eligible else 0.0
     human_touch = defer_count / eligible if eligible else 0.0
     precision = auto_correct / auto_total if auto_total else 0.0
@@ -200,9 +188,11 @@ def run_eval(
         "auto_action_precision_lower": round(lower, 4),
         "auto_action_precision_upper": round(upper, 4),
         "error_auto_execute_count": error_auto_count,
-        "by_intent": by_intent,
-        "by_repo": by_repo,
-        "by_confidence_bucket": by_bucket,
+        "prediction_artifact_hash": artifact_hash,
+        "runner_type": predictions[0].get("runner_type") if predictions else None,
+        "by_intent": _finalize_metrics(by_intent),
+        "by_repo": _finalize_metrics(by_repo),
+        "by_confidence_bucket": _finalize_metrics(by_bucket),
         "defer_reason_distribution": defer_reasons,
         "samples": sample_auto[:20],
     }
@@ -229,18 +219,19 @@ def _finalize_metrics(counter: dict[str, dict]) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="运行自动化评测")
-    parser.add_argument("--dataset", type=Path, default=Path("eval/automation/label_ground_truth_dev.jsonl"))
-    parser.add_argument("--policy", type=Path, default=Path("eval/automation/policy.json"))
-    parser.add_argument("--seed", type=int, default=42)
+    parser = argparse.ArgumentParser(description="运行自动化评测（Stage 2）")
+    parser.add_argument(
+        "--predictions",
+        type=Path,
+        default=Path("eval/automation/predictions/predictions_dev.jsonl"),
+    )
+    parser.add_argument(
+        "--policy", type=Path, default=Path("eval/automation/policy.json")
+    )
     parser.add_argument("--out", type=Path, default=Path("eval/reports/automation_eval.json"))
     args = parser.parse_args()
 
-    report = run_eval(args.dataset, args.policy, seed=args.seed)
-
-    for key in ("by_intent", "by_repo", "by_confidence_bucket"):
-        report[key] = _finalize_metrics(report[key])
-
+    report = run_eval(args.predictions, args.policy)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

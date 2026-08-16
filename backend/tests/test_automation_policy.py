@@ -158,6 +158,61 @@ class TestDuplicateDefers:
         assert decision.actions == []
 
 
+class TestAllowAutoSemantics:
+    def test_enabled_true_allow_auto_false_defers(self):
+        """enabled=true, allow_auto=false -> 必须 DEFER（P0-4）。"""
+        policy = _policy(
+            add_category_label={
+                "enabled": True,
+                "min_model_confidence": 0.80,
+                "require_evidence": True,
+                "allow_auto": False,
+            }
+        )
+        decision = decide_automation(
+            _Result(proposed_actions=[_label_action()]),
+            mode="enforce",
+            calibrated_policy=policy,
+        )
+        assert decision.disposition == AutomationDisposition.DEFER
+        assert decision.handoff.reason_code == DeferReasonCode.POLICY_BLOCKED
+
+    def test_enabled_false_allow_auto_true_defers(self):
+        """enabled=false, allow_auto=true -> 必须 DEFER（P0-4）。"""
+        policy = _policy(
+            add_category_label={
+                "enabled": False,
+                "min_model_confidence": 0.80,
+                "require_evidence": True,
+                "allow_auto": True,
+            }
+        )
+        decision = decide_automation(
+            _Result(proposed_actions=[_label_action()]),
+            mode="enforce",
+            calibrated_policy=policy,
+        )
+        assert decision.disposition == AutomationDisposition.DEFER
+        assert decision.handoff.reason_code == DeferReasonCode.POLICY_BLOCKED
+
+    def test_enabled_true_allow_auto_true_auto_executes(self):
+        """enabled=true, allow_auto=true 且其他条件满足 -> AUTO_EXECUTE。"""
+        policy = _policy(
+            add_category_label={
+                "enabled": True,
+                "min_model_confidence": 0.80,
+                "require_evidence": True,
+                "allow_auto": True,
+            }
+        )
+        decision = decide_automation(
+            _Result(proposed_actions=[_label_action()]),
+            mode="enforce",
+            calibrated_policy=policy,
+        )
+        assert decision.disposition == AutomationDisposition.AUTO_EXECUTE
+
+
 class TestPolicyBlockedDefers:
     def test_unsupported_action_defers(self):
         comment_action = AutomationAction(

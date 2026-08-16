@@ -68,7 +68,8 @@ def load_policy_for_mode(mode: str) -> CalibratedPolicy | None:
     path = settings.automation_policy_path
     policy_path = Path(path) if path else None
     try:
-        return load_calibrated_policy(policy_path)
+        # enforce 模式做严格完整性校验；失败返回 None，由 Policy Gate fail closed。
+        return load_calibrated_policy(policy_path, for_enforce=(mode == "enforce"))
     except Exception:
         # 加载失败统一按“无策略”处理，由 Policy Gate 决定是否 fail closed。
         return None
@@ -323,7 +324,17 @@ def _insert_policy_command(cur, agent_run_id: int, index: int, action: Automatio
         ),
     )
     row = cur.fetchone()
-    return row["id"] if isinstance(row, dict) else row[0]
+    if row is not None:
+        return row["id"] if isinstance(row, dict) else row[0]
+    # 幂等冲突：已有同 idempotency_key 的命令，返回其 id。
+    cur.execute(
+        "SELECT id FROM github_commands WHERE idempotency_key = %s",
+        (idempotency_key,),
+    )
+    existing = cur.fetchone()
+    if existing is None:
+        raise RuntimeError(f"幂等冲突但未找到已有命令: {idempotency_key}")
+    return existing["id"] if isinstance(existing, dict) else existing[0]
 
 
 def _insert_human_command(cur, agent_run_id: int, review_task_id: int, index: int, action: AutomationAction) -> int:
@@ -353,4 +364,14 @@ def _insert_human_command(cur, agent_run_id: int, review_task_id: int, index: in
         ),
     )
     row = cur.fetchone()
-    return row["id"] if isinstance(row, dict) else row[0]
+    if row is not None:
+        return row["id"] if isinstance(row, dict) else row[0]
+    # 幂等冲突：已有同 idempotency_key 的命令，返回其 id。
+    cur.execute(
+        "SELECT id FROM github_commands WHERE idempotency_key = %s",
+        (idempotency_key,),
+    )
+    existing = cur.fetchone()
+    if existing is None:
+        raise RuntimeError(f"幂等冲突但未找到已有命令: {idempotency_key}")
+    return existing["id"] if isinstance(existing, dict) else existing[0]
