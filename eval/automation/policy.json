@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "policy_version": "2026-08-17-initial-no-calibration",
+  "created_at": "2026-08-17T00:00:00Z",
+  "source_dataset_hash": "",
+  "model_name": null,
+  "prompt_version": null,
+  "rules": {
+    "add_category_label": {
+      "enabled": false,
+      "min_model_confidence": 1.0,
+      "require_evidence": true,
+      "observed_precision": null,
+      "coverage": null,
+      "sample_count": 0,
+      "allow_auto": false
+    },
+    "request_missing_information": {
+      "enabled": false,
+      "min_model_confidence": 1.0,
+      "require_evidence": true,
+      "observed_precision": null,
+      "coverage": null,
+      "sample_count": 0,
+      "allow_auto": false
+    },
+    "post_technical_reply": {
+      "enabled": false,
+      "min_model_confidence": 1.0,
+      "require_evidence": true,
+      "observed_precision": null,
+      "coverage": null,
+      "sample_count": 0,
+      "allow_auto": false
+    },
+    "duplicate_action": {
+      "enabled": false,
+      "min_model_confidence": 1.0,
+      "require_evidence": true,
+      "observed_precision": null,
+      "coverage": null,
+      "sample_count": 0,
+      "allow_auto": false
+    }
+  }
+}
