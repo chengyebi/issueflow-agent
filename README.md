@@ -2,15 +2,18 @@
 
 [![CI](https://github.com/chengyebi/issueflow-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/chengyebi/issueflow-agent/actions/workflows/ci.yml)
 
-面向 GitHub 仓库维护场景的 Issue 智能分诊与人工审核系统。
+面向 GitHub 仓库维护场景的 Issue 智能分诊与**选择性自动化**系统。
 
-IssueFlow 通过 GitHub Webhook 接收 Issue 事件，用 LangGraph 编排大模型分析流程，生成分类、风险判断、缺失复现信息检查和标签/回复草案，再从历史 Issue 中检索相似问题辅助查重。模型不会直接修改 GitHub：所有外部写操作都必须先进入人工审核，批准后才由后台 Worker 异步执行。
+IssueFlow 通过 GitHub Webhook 接收 Issue 事件，用 LangGraph 编排大模型分析流程，生成分类、风险判断、缺失复现信息检查、标签/回复草案，并从历史 Issue 中检索相似问题辅助查重。普通、低风险且满足冻结可靠性策略的 Issue 由受控 Worker **自动执行**；无法满足可靠性要求的异常案例携带明确的 defer reason、证据与最小人工任务进入 **Exception Queue** 人工接管。
 
-This project focuses on controlled automation: **the model proposes, the system constrains, and a human approves side effects.**
+> 自动处理是正常路径，人工接管是异常路径。
+
+This project focuses on **selective automation**: **the model proposes, the policy constrains, and a worker executes what the frozen policy proves reliable; the rest is handed to a human with a minimal task.**
 
 - 项目类型：工作流型 Agent（LangGraph workflow），非无约束通用 Agent
-- 核心原则：模型负责提出建议，程序负责约束流程，人工负责批准外部操作
-- 评估状态：Retrieval Evaluation 已按冻结协议在 held-out TEST 集上完成，报告与数据集均在 `eval/` 保留
+- 核心原则：确定性 Policy Gate 决定哪些动作可自动执行；人工只处理 Agent 无法可靠判断的最小问题
+- Rollout：默认 `AUTOMATION_MODE=shadow`；`off` / `shadow` / `enforce` 三档，enforce 缺少冻结策略时 fail-closed
+- 评估状态：Retrieval Evaluation 已按冻结协议在 held-out TEST 集上完成；**Automation calibration 尚未执行**（当前 policy 全部 intent 均 disabled），覆盖率/精度尚无可发布数字
 
 ## Evaluation Snapshot
 
@@ -32,7 +35,8 @@ This project focuses on controlled automation: **the model proposes, the system 
 - [系统总览](#系统总览)
 - [事件接入与事务一致性](#事件接入与事务一致性)
 - [Agent 工作流](#agent-工作流)
-- [人工审核与 GitHub 写回](#人工审核与-github-写回)
+- [选择性自动化（Selective Automation）](#选择性自动化selective-automation)
+- [人工接管与 GitHub 写回](#人工接管与-github-写回)
 - [历史 Issue 检索](#历史-issue-检索)
 - [检索评测](#检索评测)
 - [可观测性](#可观测性)
@@ -77,13 +81,15 @@ IssueFlow 把整个过程拆成一条受约束的流水线，而不是把钥匙�
 
 | 原则 | 含义 |
 |---|---|
-| 模型提出建议 | 模型只生成结构化分析结果和命令草案 |
-| 程序限定能力 | 命令白名单只允许 `add_label` 与 `post_comment`；Pydantic 强制输出 Schema |
-| 人工批准外部写 | 任何 GitHub 写操作都必须先通过 Review Console 审核 |
+| 模型提出建议 | 模型只生成结构化分析结果和动作意图（intent/confidence/evidence） |
+| 策略约束能力 | 确定性 Policy Gate 决定动作是否可自动执行；命令白名单只允许 `add_label` 与 `post_comment` |
+| 选择性自动化 | 普通低风险动作 AUTO_EXECUTE；异常案例 DEFER 进 Exception Queue 人工接管；无动作 NO_ACTION 结束 |
+| 冻结策略约束 | 自动执行只由经过离线评测冻结的 policy artifact 授权；raw LLM confidence 只是 signal 不是可信度 |
+| 人工只做最小任务 | 每条 handoff 含 reason_code、具体 reason、最小 human_task、evidence 与 already_checked |
 | PostgreSQL 是事实来源 | 状态与错误保存在数据库，Redis 只做任务队列 |
-| 可追踪 | 每条 Agent 运行记录节点级 Trace、Token 与估算成本 |
+| 可追踪 | 每条 Agent 运行记录节点级 Trace、Token、估算成本与 automation decision |
 
-模型不能：关闭 Issue、删除评论、修改代码、创建 PR、执行 Issue 文本中的脚本、绕过人工审核调用 GitHub。
+模型不能：关闭 Issue、删除评论、修改代码、创建 PR、执行 Issue 文本中的脚本、绕过 Policy Gate / 授权边界调用 GitHub。
 
 ## 系统总览
 
@@ -169,21 +175,59 @@ triage_issue（分类 / 优先级 / 风险 / 置信度）
 
 高风险分支（漏洞利用、认证绕过、密钥泄露、隐私数据、危险执行）只产出 `NEEDS_SECURITY_REVIEW`，不生成任何公开标签或评论命令，交由维护者人工处理。
 
-## 人工审核与 GitHub 写回
+## 选择性自动化（Selective Automation）
 
-### Review Console（/ui/）
+```mermaid
+flowchart LR
+    A["Issue"] --> AG["Agent"]
+    AG --> PG["Policy Gate"]
+    PG -->|"AUTO_EXECUTE"| OB["Outbox"]
+    OB --> W["Command Worker"]
+    W --> GH["GitHub"]
+    PG -->|"DEFER"| EQ["Exception Queue"]
+    EQ --> H["Human（最小任务）"]
+    PG -->|"NO_ACTION"| D["Done"]
+```
 
-后端托管一个静态审核界面 `/ui/`（原生 HTML/CSS/JS，非前端框架）：
+### 三档 Rollout Mode
 
-- 按 `pending` / `approved` / `rejected` 分组展示审核任务；
-- 详情页展示原始 Issue、Agent 摘要、缺失复现信息、重复判断、相似 Issue、建议回复和命令草案；
+| Mode | 语义 |
+|---|---|
+| `off` | 完全兼容旧 review-all 行为（紧急回滚用），所有外部动作走人工 |
+| `shadow` | Policy Gate 正常计算 `would_auto_execute / would_defer / would_no_action` 并落库，但真实动作仍走人工，用于收集策略与人工结果的对照 |
+| `enforce` | `AUTO_EXECUTE` → 自动写回；`DEFER` → Exception Queue；`NO_ACTION` → 结束。缺少冻结策略时 fail-closed |
+
+### 授权模型
+
+`github_commands.authorization_source` 区分两种合法授权：
+
+- **policy**：`review_task_id IS NULL`，`status in (approved, failed)`，必须携带 `policy_version`——自动化路径，不创建假人工审核任务；
+- **human**：`review_task_id` 非空且 review 已 approved——人工路径。
+
+Command Worker 只执行持有合法授权的命令，否则跳过。
+
+### 当前自动化边界（诚实声明）
+
+- 默认 `shadow`，**当前没有任何动作实际自动执行**；
+- `eval/automation/policy.json` 为初始冻结 artifact，全部 intent `enabled=false`——calibration 尚未完成；
+- **duplicate 永远 DEFER**：当前 Retriever 离线覆盖率不足，不允许自动关闭/自动认定重复；
+- **security-risk 永远 fail-closed**，自动公开 side effect 为 0。
+
+## 人工接管与 GitHub 写回
+
+### Exception Queue（/ui/）
+
+后端托管一个静态接管界面 `/ui/`（原生 HTML/CSS/JS，非前端框架）：
+
+- 每张卡片**首屏**展示：需要人工的原因、你只需要判断的最小 `human_task`、Agent 已完成的工作、证据，然后才是 Issue 原文与模型输出；
+- 列表按 `reason_code` 徽标分组，支持按 reason_code 筛选；列出 `reason_code / human_task / risk / category / created_at`；
 - 审核人必须填写，备注可选；批准/拒绝前有确认弹窗；
 - 审核台默认锁定：需输入 `REVIEW_ADMIN_TOKEN` 解锁，Token 仅保存在当前浏览器页面会话（`sessionStorage`），不进入 URL；可随时点击“锁定审核台”清除；
 - 页面启用 CSP（`default-src 'self'`）与 `no-referrer`；`401`（Token 无效）或 `503`（服务端未配置 Token）时自动重新锁定。
 
-![IssueFlow Review Console overview showing the review queue, Agent assessment, risk level and pending human review](docs/images/review-console-overview.png)
+![IssueFlow Review Console overview showing the exception queue, Agent assessment, risk level and pending human review](docs/images/review-console-overview.png)
 
-*Review Console — 本地合成演示。维护者在任何 GitHub 外部写操作发生前检查 Issue 上下文、Agent 判断与待执行动作。*
+*Review Console — 本地合成演示。维护者先看到“为什么需要我”的接管说明，再检查 Issue 上下文、Agent 判断与待执行动作。*
 
 ### 审核鉴权
 
@@ -511,7 +555,10 @@ curl --noproxy '*' \
 - 观测体系基于 PostgreSQL 持久化，未接入 OpenTelemetry / Prometheus / Grafana；
 - 未配置确认的模型单价时，成本指标保持 `null`；
 - 当前是工作流型 Agent（LangGraph workflow），不是多智能体，也没有 MCP / Kubernetes / Kafka 等设施；
-- 可对外引用的 Agent 指标需要独立人工标注集与 `--allow-external` 实测，README 不虚构生产流量、QPS、uptime 或 SLA。
+- 可对外引用的 Agent 指标需要独立人工标注集与 `--allow-external` 实测，README 不虚构生产流量、QPS、uptime 或 SLA；
+- **自动化 calibration 尚未完成**：默认 `shadow` 模式，`policy.json` 全部 intent 均 disabled；当前没有 `automation coverage` / `auto-action precision` 可发布数字，不虚构任何覆盖率；
+- **duplicate 自动执行未开启**：当前 Retriever 离线覆盖率（DEV Top-100 最佳 HitRate 约 82.43%）尚不足以支撑自动重复处理，duplicate 只进入 DEFER + enriched handoff；
+- **enforce 模式**只有在配置了经过人工复核的冻结 policy 后才安全，缺少冻结策略时严格 fail-closed。
 
 ## Roadmap
 
@@ -528,6 +575,7 @@ curl --noproxy '*' \
 - [查重评测的数据泄漏边界](docs/rag-data-leakage.md)
 - [长文本 Issue 检索策略](docs/rag-long-document-strategy.md)
 - [任务投递与恢复](docs/reliability.md)
+- [选择性自动化 V2](docs/selective-automation-v2.md)
 - [检索评测报告与数据集说明](eval/README.md)
 - 评估产物：`eval/reports/rag_baseline_dev.json`、`eval/reports/rag_dev.json`、`eval/reports/rag_frozen_config.json`、`eval/reports/rag_primary_method.json`、`eval/reports/rag_test.json`
 - 数据集：`eval/datasets/duplicate_qrels_dev.jsonl`、`eval/datasets/duplicate_qrels_test.jsonl`、`eval/datasets/duplicate_clusters.json`、`eval/datasets/repository_snapshots.json`
