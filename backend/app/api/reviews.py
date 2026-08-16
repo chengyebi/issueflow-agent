@@ -14,10 +14,10 @@ ALLOWED_STATUSES = {"pending", "approved", "rejected"}
 
 
 @router.get("/review-tasks")
-def get_review_tasks(status: str | None = None):
+def get_review_tasks(status: str | None = None, reason_code: str | None = None):
     if status is not None and status not in ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid review status")
-    items = list_review_tasks(status)
+    items = list_review_tasks(status, reason_code=reason_code)
     return {"count": len(items), "items": items}
 
 

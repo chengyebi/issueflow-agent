@@ -2,6 +2,7 @@
 
 from app.rag.indexing import embed_historical_issue
 from app.tasks import (
+    process_authorized_commands,
     process_github_command,
     process_issue_agent_run,
     process_review_commands,
@@ -13,5 +14,6 @@ __all__ = [
     "process_github_command",
     "process_issue_agent_run",
     "process_review_commands",
+    "process_authorized_commands",
     "process_issue_embedding",
 ]

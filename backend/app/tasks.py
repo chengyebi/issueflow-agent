@@ -12,125 +12,10 @@ from app.github_client import (
     add_issue_label,
     post_issue_comment,
 )
+from app.services.automation_router import save_completed_run_and_route
 from app.services.traces import DatabaseTraceRecorder
 
 DATABASE_URL = get_settings().database_url
-
-def save_completed_run_and_create_review(
-    agent_run_id: int,
-    result: dict,
-    duration_ms: int,
-    trace: TraceSession,
-    estimated_cost_usd: float | None,
-) -> None:
-    actions = result.get("proposed_actions", [])
-
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE agent_runs
-                SET
-                    status = 'completed',
-                    finished_at = NOW(),
-                    result_json = %s,
-                    error_message = NULL,
-                    error_type = NULL,
-                    duration_ms = %s,
-                    input_tokens = %s,
-                    output_tokens = %s,
-                    structured_output_success = %s,
-                    estimated_cost_usd = %s
-                WHERE id = %s;
-                """,
-                (
-                    Jsonb(result),
-                    duration_ms,
-                    trace.input_tokens,
-                    trace.output_tokens,
-                    trace.structured_output_success,
-                    estimated_cost_usd,
-                    agent_run_id,
-                ),
-            )
-
-            cur.execute(
-                """
-                INSERT INTO review_tasks (agent_run_id)
-                VALUES (%s)
-                ON CONFLICT (agent_run_id)
-                DO UPDATE SET
-                    agent_run_id = EXCLUDED.agent_run_id
-                RETURNING id;
-                """,
-                (agent_run_id,),
-            )
-
-            row = cur.fetchone()
-
-            if row is None:
-                raise RuntimeError("创建审核任务后没有返回 ID")
-
-            review_task_id = row[0]
-
-            duplicate = result.get("duplicate_assessment") or {}
-            if "is_duplicate" in duplicate:
-                cur.execute(
-                    """
-                    INSERT INTO duplicate_assessments (
-                        agent_run_id, repo, issue_number, is_duplicate,
-                        candidate_issue_number, confidence, rationale,
-                        evidence, retrieval_mode
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (agent_run_id) DO UPDATE SET
-                        is_duplicate = EXCLUDED.is_duplicate,
-                        candidate_issue_number = EXCLUDED.candidate_issue_number,
-                        confidence = EXCLUDED.confidence,
-                        rationale = EXCLUDED.rationale,
-                        evidence = EXCLUDED.evidence,
-                        retrieval_mode = EXCLUDED.retrieval_mode
-                    """,
-                    (
-                        agent_run_id,
-                        result["repo"],
-                        result["issue_number"],
-                        duplicate["is_duplicate"],
-                        duplicate.get("candidate_issue_number"),
-                        duplicate.get("confidence", 0.0),
-                        duplicate.get("rationale", ""),
-                        Jsonb(duplicate.get("evidence", [])),
-                        result.get("retrieval_mode", "lexical"),
-                    ),
-                )
-
-            for index, action in enumerate(actions):
-                command_type = action["type"]
-                command_value = action["value"]
-
-                idempotency_key = (
-                    f"agent-run:{agent_run_id}:"
-                    f"action:{index}:{command_type}"
-                )
-
-                cur.execute(
-                    """
-                    INSERT INTO github_commands (
-                        review_task_id,
-                        command_type,
-                        payload,
-                        idempotency_key
-                    )
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (idempotency_key)
-                    DO NOTHING;
-                    """,
-                    (
-                        review_task_id,
-                        command_type,
-                        Jsonb({"value": command_value}),
-                        idempotency_key,
-                    ),
-                )
 
 def process_issue_agent_run(agent_run_id: int) -> dict:
     # 第一步：查询任务对应的 Issue，并把任务标记为 running
@@ -210,8 +95,8 @@ def process_issue_agent_run(agent_run_id: int) -> dict:
         # Pydantic 对象转成普通字典
         result = response.model_dump(mode="json")
 
-        # 第四步：成功后保存结果
-        save_completed_run_and_create_review(
+        # 第四步：成功后保存结果并按 automation mode 路由
+        save_completed_run_and_route(
             agent_run_id=agent_run_id,
             result=result,
             duration_ms=round((time.perf_counter() - started) * 1000),
@@ -270,6 +155,32 @@ def _estimate_cost(input_tokens: int, output_tokens: int) -> float | None:
         + output_tokens * settings.llm_output_cost_per_million_usd
     ) / 1_000_000
 
+def is_command_authorized(command: dict) -> bool:
+    """判断一个 GitHub Command 是否持有合法授权。
+
+    - policy 授权：review_task_id 必须为空，command 状态为 approved/failed，
+      且必须有 policy_version。
+    - human 授权：必须关联已 approved 的 review_task，command 状态为 approved/failed。
+    """
+    source = command.get("authorization_source")
+
+    if source == "policy":
+        return (
+            command.get("review_task_id") is None
+            and command.get("command_status") in {"approved", "failed"}
+            and bool(command.get("policy_version"))
+        )
+
+    if source == "human":
+        return (
+            command.get("review_task_id") is not None
+            and command.get("review_status") == "approved"
+            and command.get("command_status") in {"approved", "failed"}
+        )
+
+    return False
+
+
 def process_github_command(command_id: int) -> dict:
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -280,15 +191,18 @@ def process_github_command(command_id: int) -> dict:
                     gc.command_type,
                     gc.payload,
                     gc.status AS command_status,
+                    gc.review_task_id,
+                    gc.authorization_source,
+                    gc.policy_version,
                     rt.status AS review_status,
                     ie.repo,
                     ie.issue_number
                 FROM github_commands gc
-                JOIN review_tasks rt
+                LEFT JOIN review_tasks rt
                     ON rt.id = gc.review_task_id
-                JOIN agent_runs ar
-                    ON ar.id = rt.agent_run_id
-                JOIN issue_events ie
+                LEFT JOIN agent_runs ar
+                    ON ar.id = gc.agent_run_id
+                LEFT JOIN issue_events ie
                     ON ie.id = ar.issue_event_id
                 WHERE gc.id = %s
                 FOR UPDATE OF gc;
@@ -303,10 +217,7 @@ def process_github_command(command_id: int) -> dict:
                     f"GitHub Command 不存在: {command_id}"
                 )
 
-            if (
-                command["review_status"] != "approved"
-                or command["command_status"] not in {"approved", "failed"}
-            ):
+            if not is_command_authorized(command):
                 return {
                     "command_id": command_id,
                     "status": command["command_status"],
@@ -417,6 +328,54 @@ def process_github_command(command_id: int) -> dict:
                 )
 
         raise
+
+
+def process_authorized_commands(agent_run_id: int) -> dict:
+    """执行一个 Agent Run 下所有 policy 授权的 GitHub Commands。
+
+    这是自动化路径的统一入口：policy 授权命令在 AUTO_EXECUTE 时写入
+    outbox_events（event_type='github_commands'），由该函数消费。
+    授权判定复用 process_github_command 内部的 is_command_authorized。
+    """
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM github_commands
+                WHERE agent_run_id = %s
+                  AND authorization_source = 'policy'
+                  AND (status = 'approved' OR (status = 'failed' AND retry_safe))
+                ORDER BY id;
+                """,
+                (agent_run_id,),
+            )
+            command_ids = [row["id"] for row in cur.fetchall()]
+
+    results = []
+    retryable_failures = []
+    for command_id in command_ids:
+        try:
+            results.append(process_github_command(command_id))
+        except Exception as exc:
+            failure = {
+                "command_id": command_id,
+                "status": "failed",
+                "error_type": type(exc).__name__,
+            }
+            results.append(failure)
+            if bool(getattr(exc, "retry_safe", False)):
+                retryable_failures.append(failure)
+
+    if retryable_failures:
+        raise RuntimeError(
+            f"{len(retryable_failures)} 个 GitHub Command 执行失败，将按有限策略重试"
+        )
+
+    return {
+        "agent_run_id": agent_run_id,
+        "commands": results,
+    }
 
 
 def process_review_commands(

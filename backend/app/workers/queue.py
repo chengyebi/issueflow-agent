@@ -45,6 +45,21 @@ def enqueue_review_commands(review_task_id: int) -> str:
     return job.id
 
 
+def enqueue_authorized_commands(agent_run_id: int) -> str:
+    from app.workers.tasks import process_authorized_commands
+
+    job = get_queue().enqueue(
+        process_authorized_commands,
+        agent_run_id,
+        job_timeout=get_settings().command_job_timeout_seconds,
+        retry=Retry(
+            max=get_settings().rq_max_retries,
+            interval=get_settings().retry_intervals,
+        ),
+    )
+    return job.id
+
+
 def enqueue_issue_embedding(historical_issue_id: int) -> str:
     from app.workers.tasks import process_issue_embedding
 

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 
+from app.services.automation_metrics import aggregate_automation_metrics
 from app.services.traces import aggregate_run_metrics, get_trace, list_traces
 
 router = APIRouter(tags=["observability"])
@@ -29,3 +30,8 @@ def trace_detail(trace_id: str):
 @router.get("/metrics/agent-runs")
 def agent_run_metrics():
     return aggregate_run_metrics()
+
+
+@router.get("/metrics/automation")
+def automation_metrics():
+    return aggregate_automation_metrics()

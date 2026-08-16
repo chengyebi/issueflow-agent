@@ -8,7 +8,7 @@ def test_review_ui_index_is_served(client):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "IssueFlow Review Console" in response.text
-    assert "审核 Agent 提议，再安全写回 GitHub" in response.text
+    assert "异常人工接管队列" in response.text
     assert 'id="review-list"' in response.text
     assert 'id="detail-panel"' in response.text
     assert 'id="system-status-label"' in response.text
@@ -139,7 +139,7 @@ def test_review_task_list_contract_for_ui(client, monkeypatch):
     monkeypatch.setattr(
         reviews,
         "list_review_tasks",
-        lambda status: [item] if status == "pending" else [],
+        lambda status, reason_code=None: [item] if status == "pending" else [],
     )
 
     response = client.get("/review-tasks?status=pending")

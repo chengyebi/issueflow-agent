@@ -6,20 +6,30 @@ from app.db.connection import connect
 from app.services.exceptions import ConflictError, NotFoundError
 
 
-def list_review_tasks(status: str | None = None) -> list[dict]:
+def list_review_tasks(status: str | None = None, reason_code: str | None = None) -> list[dict]:
     query = """
         SELECT rt.id AS review_task_id, rt.status AS review_status,
                rt.reviewer, rt.review_note, rt.created_at, rt.reviewed_at,
                ar.id AS agent_run_id, ar.result_json,
+               ad.disposition, ad.policy_version, ad.shadow,
+               ad.reason_code, ad.reason, ad.human_task,
+               ad.evidence, ad.already_checked,
                ie.repo, ie.issue_number, ie.issue_title, ie.issue_body
         FROM review_tasks rt
         JOIN agent_runs ar ON ar.id = rt.agent_run_id
+        LEFT JOIN automation_decisions ad ON ad.agent_run_id = ar.id
         JOIN issue_events ie ON ie.id = ar.issue_event_id
     """
     params: list[str] = []
+    clauses: list[str] = []
     if status is not None:
-        query += " WHERE rt.status = %s"
+        clauses.append("rt.status = %s")
         params.append(status)
+    if reason_code is not None:
+        clauses.append("ad.reason_code = %s")
+        params.append(reason_code)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY rt.id DESC"
 
     with connect(row_factory=dict_row) as conn, conn.cursor() as cur:
@@ -29,7 +39,9 @@ def list_review_tasks(status: str | None = None) -> list[dict]:
             cur.execute(
                 """
                 SELECT id, command_type, payload, status, idempotency_key,
-                       error_type, error_message, retry_safe
+                       error_type, error_message, retry_safe,
+                       authorization_source, policy_version, action_intent,
+                       action_confidence, rationale, evidence
                 FROM github_commands WHERE review_task_id = %s ORDER BY id
                 """,
                 (review["review_task_id"],),

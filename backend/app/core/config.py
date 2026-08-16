@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     prompt_version: str = "triage-v2"
     agent_version: str = "workflow-v2"
 
+    # 选择性自动化 rollout mode：off | shadow | enforce
+    automation_mode: Literal["off", "shadow", "enforce"] = "shadow"
+    # 冻结策略 artifact 路径（相对仓库根），为空时用默认路径
+    automation_policy_path: str = ""
+
     rq_queue_name: str = "issueflow"
     agent_job_timeout_seconds: int = 180
     command_job_timeout_seconds: int = 120

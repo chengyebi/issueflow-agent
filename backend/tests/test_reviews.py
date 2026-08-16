@@ -101,7 +101,9 @@ def test_review_endpoint_accepts_valid_admin_token(
     review_admin_headers,
     monkeypatch,
 ):
-    monkeypatch.setattr(reviews, "list_review_tasks", lambda status: [])
+    monkeypatch.setattr(
+        reviews, "list_review_tasks", lambda status, reason_code=None: []
+    )
 
     response = unauthenticated_client.get(
         "/review-tasks?status=pending",

@@ -667,15 +667,21 @@ function renderReviewList() {
         statusLabel(review.review_status),
         review.review_status || "neutral",
       ),
+      renderReasonCodeBadge(review.reason_code),
     );
 
     const title = createElement("h3", {
       text: review.issue_title || "无标题 Issue",
     });
 
+    const summaryText =
+      review.human_task ||
+      review.reason ||
+      result.summary ||
+      review.issue_body;
     const summary = createElement("p", {
       className: "review-summary",
-      text: truncateText(result.summary || review.issue_body),
+      text: truncateText(summaryText),
     });
 
     const meta = createElement("div", { className: "review-item-meta" });
@@ -721,6 +727,88 @@ function renderDetailEmpty(title, message) {
   );
 
   detailPanel.append(empty);
+}
+
+function renderReasonCodeBadge(reasonCode) {
+  if (!reasonCode) {
+    return createBadge("无原因码", "neutral");
+  }
+  const labels = {
+    security_risk: "安全风险",
+    retrieval_degraded: "检索降级",
+    duplicate_uncertain: "疑似重复",
+    conflicting_evidence: "证据冲突",
+    insufficient_evidence: "证据不足",
+    low_calibrated_confidence: "置信度不足",
+    unsupported_action: "不支持的动作",
+    policy_blocked: "策略拦截",
+    out_of_distribution: "分布外",
+    model_failure: "模型失败",
+  };
+  return createBadge(labels[reasonCode] || reasonCode, "warning");
+}
+
+function renderHandoffBlock(review) {
+  const reason = review.reason || "";
+  const humanTask = review.human_task || "";
+  const reasonCode = review.reason_code || "";
+  const evidence = asArray(review.evidence);
+  const alreadyChecked = asArray(review.already_checked);
+
+  if (!reason && !humanTask) {
+    return createSection(
+      "需要人工的原因",
+      createTextBlock("这条任务在人工审核列表中，但没有额外的接管说明。", "无"),
+    );
+  }
+
+  const container = createElement("div", {
+    className: "handoff-block",
+  });
+
+  const reasonItem = createElement("div", {
+    className: "handoff-item",
+  });
+  reasonItem.append(
+    createElement("strong", { text: "需要人工的原因" }),
+    createTextBlock(reason, "无"),
+  );
+
+  const taskItem = createElement("div", {
+    className: "handoff-item",
+  });
+  taskItem.append(
+    createElement("strong", { text: "你只需要判断" }),
+    createTextBlock(humanTask, "无"),
+  );
+
+  container.append(reasonItem, taskItem);
+
+  if (alreadyChecked.length > 0) {
+    const checkedList = createElement("ul", { className: "check-list" });
+    alreadyChecked.forEach((item) => {
+      const li = createElement("li", { text: `✔ ${item}` });
+      checkedList.append(li);
+    });
+    container.append(
+      createElement("strong", { text: "Agent 已完成" }),
+      checkedList,
+    );
+  }
+
+  if (evidence.length > 0) {
+    const evidenceList = createElement("ul", { className: "evidence-list" });
+    evidence.forEach((item) => {
+      const li = createElement("li", { text: item });
+      evidenceList.append(li);
+    });
+    container.append(
+      createElement("strong", { text: "证据" }),
+      evidenceList,
+    );
+  }
+
+  return createSection("为什么需要我", container);
 }
 
 function renderMissingFields(fields) {
@@ -1248,6 +1336,8 @@ function renderSelectedReview() {
     createDefinitionItem("创建时间", formatDateTime(review.created_at)),
   );
 
+  const handoffSection = renderHandoffBlock(review);
+
   const issueSection = createSection(
     "原始 Issue",
     createTextBlock(review.issue_body, "Issue 正文为空。"),
@@ -1295,6 +1385,7 @@ function renderSelectedReview() {
     content.append(header, facts);
     content.append(
       createSection("审核结果", reviewFacts),
+      handoffSection,
       issueSection,
       summarySection,
       missingSection,
@@ -1313,6 +1404,7 @@ function renderSelectedReview() {
     content.append(
       header,
       facts,
+      handoffSection,
       issueSection,
       summarySection,
       missingSection,

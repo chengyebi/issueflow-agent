@@ -5,6 +5,8 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, model_validator
 
+from app.automation.handoff import render_missing_information_comment
+from app.automation.models import ActionIntent, AutomationAction
 from app.core.config import get_settings
 from app.core.tracing import TraceSession, current_trace, trace_node, use_trace
 from app.rag.retrieval import HybridRetriever
@@ -46,11 +48,6 @@ class ReviewDraft(BaseModel):
     suggested_reply: str = Field(description="建议回复给 Issue 提交者的内容")
 
 
-class ProposedAction(BaseModel):
-    type: Literal["add_label", "post_comment"]
-    value: str
-
-
 class DuplicateJudgment(BaseModel):
     is_duplicate: bool
     confidence: float = Field(ge=0.0, le=1.0)
@@ -82,7 +79,7 @@ class IssueAgentResponse(BaseModel):
     summary: str
     suggested_reply: str
     status: ReviewStatus
-    proposed_actions: list[ProposedAction]
+    proposed_actions: list[AutomationAction] = Field(default_factory=list)
     similar_issues: list[SimilarIssueCandidate] = Field(default_factory=list)
     retrieval_mode: str = "lexical"
     retrieval_degraded: bool = False
@@ -110,7 +107,7 @@ class IssueAgentState(TypedDict, total=False):
     summary: str
     suggested_reply: str
     status: ReviewStatus
-    proposed_actions: list[dict[str, str]]
+    proposed_actions: list[dict]
     similar_issues: list[dict]
     retrieval_mode: str
     retrieval_degraded: bool
@@ -302,8 +299,8 @@ def draft_review(state: IssueAgentState) -> dict:
                 "system",
                 """你负责检查 GitHub Issue 的信息完整性。
 对于 bug，检查运行环境、软件版本、复现步骤、预期结果、实际结果和错误日志。
-列出缺失信息，为维护者生成摘要，并生成礼貌、具体、简短的建议回复。
-不要声称问题已经修复，不要生成关闭 Issue 或修改代码的建议。""",
+只列出缺失信息，并为维护者生成简洁摘要。
+不要生成关闭 Issue 或修改代码的建议，不要生成对外回复正文。""",
             ),
             (
                 "human",
@@ -313,20 +310,65 @@ def draft_review(state: IssueAgentState) -> dict:
             ),
         ],
     )
+    # suggested_reply 保留为内部辅助信息，但不自动变成对外动作。
     return result.model_dump()
 
 
 @trace_node("prepare_actions")
 def prepare_actions(state: IssueAgentState) -> dict:
+    """把 Agent 判断转成结构化 AutomationAction。
+
+    核心语义变更：
+      - suggested_reply != external GitHub action。
+      - 默认不再生成 post_comment。
+      - 普通 Issue 没有必要公开回复时，可以只 add_label。
+      - 缺失信息回复由确定性模板生成，不让 LLM 自由作文。
+    """
     if state.get("duplicate_assessment", {}).get("is_duplicate"):
         return {"status": "WAITING_REVIEW", "proposed_actions": []}
-    actions: list[dict[str, str]] = []
-    label = CATEGORY_TO_GITHUB_LABEL.get(state["category"])
+
+    actions: list[AutomationAction] = []
+    confidence = float(state.get("confidence", 0.0))
+
+    label = CATEGORY_TO_GITHUB_LABEL.get(state.get("category", "other"))
     if label is not None:
-        actions.append({"type": "add_label", "value": label})
-    if state["suggested_reply"].strip():
-        actions.append({"type": "post_comment", "value": state["suggested_reply"]})
-    return {"status": "WAITING_REVIEW", "proposed_actions": actions}
+        actions.append(
+            AutomationAction(
+                type="add_label",
+                value=label,
+                intent=ActionIntent.ADD_CATEGORY_LABEL,
+                confidence=confidence,
+                rationale=(
+                    f"Issue 被分诊为 {state.get('category')}，对应 GitHub label。"
+                ),
+                evidence=[f"分类：{state.get('category')}"],
+            )
+        )
+
+    # 只有 agent 明确判断需要回复时，才生成模板化评论。
+    missing_fields = list(state.get("missing_repro_fields") or [])
+    if missing_fields:
+        try:
+            comment = render_missing_information_comment(missing_fields)
+        except ValueError:
+            comment = ""
+        if comment:
+            actions.append(
+                AutomationAction(
+                    type="post_comment",
+                    value=comment,
+                    intent=ActionIntent.REQUEST_MISSING_INFORMATION,
+                    confidence=confidence,
+                    rationale="Issue 缺少复现信息，按确定性模板请求补充。",
+                    evidence=[f"缺失字段：{'、'.join(missing_fields)}"],
+                )
+            )
+
+    # 不再有 if suggested_reply: post_comment 的默认逻辑。
+    return {
+        "status": "WAITING_REVIEW",
+        "proposed_actions": [action.model_dump(mode="json") for action in actions],
+    }
 
 
 def build_workflow():

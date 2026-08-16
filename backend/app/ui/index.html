@@ -48,11 +48,12 @@
       <main>
         <section class="hero" aria-labelledby="page-title">
           <div>
-            <p class="eyebrow">Human-in-the-loop operations</p>
-            <h1 id="page-title">审核 Agent 提议，再安全写回 GitHub</h1>
+            <p class="eyebrow">Selective automation · Exception queue</p>
+            <h1 id="page-title">异常人工接管队列</h1>
             <p class="hero-description">
-              在一个界面中查看 Issue 上下文、模型判断、相似 Issue 和待执行命令。
-              所有外部写操作都必须经过维护者批准。
+              普通且满足冻结可靠性策略的 Issue 由受控 Worker 自动处理。
+              这里是需要人工接管的异常队列：每条卡片首先说明“为什么需要我”、
+              你要判断的最小问题、Agent 已完成的工作与证据，然后才是 Issue 原文与模型输出。
             </p>
           </div>
 

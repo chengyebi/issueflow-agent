@@ -50,10 +50,17 @@ def dispatch_event(event_key: str) -> DispatchResult:
         attempt = event["attempts"] + 1
 
     try:
-        from app.workers.queue import enqueue_issue_agent_run, enqueue_review_commands
+        from app.workers.queue import (
+            enqueue_issue_agent_run,
+            enqueue_review_commands,
+        )
 
         if event["event_type"] == "agent_run":
             rq_job_id = enqueue_issue_agent_run(event["aggregate_id"])
+        elif event["event_type"] == "github_commands":
+            from app.workers.queue import enqueue_authorized_commands
+
+            rq_job_id = enqueue_authorized_commands(event["aggregate_id"])
         elif event["event_type"] == "review_commands":
             rq_job_id = enqueue_review_commands(event["aggregate_id"])
         elif event["event_type"] == "issue_index":
@@ -160,24 +167,49 @@ def requeue_failed_command(command_id: int) -> str:
             """
             UPDATE github_commands gc
             SET status = 'approved', error_message = NULL, updated_at = NOW()
-            FROM review_tasks rt
             WHERE gc.id = %s AND gc.status = 'failed' AND gc.retry_safe
-              AND rt.id = gc.review_task_id AND rt.status = 'approved'
-            RETURNING gc.review_task_id
+              AND (
+                    -- human 授权：必须有已 approved 的 review_task
+                    (gc.authorization_source = 'human'
+                     AND EXISTS (
+                         SELECT 1 FROM review_tasks rt
+                         WHERE rt.id = gc.review_task_id
+                           AND rt.status = 'approved'
+                     ))
+                    -- policy 授权：必须携带 policy_version，无 review_task
+                    OR (gc.authorization_source = 'policy'
+                        AND gc.review_task_id IS NULL
+                        AND gc.policy_version IS NOT NULL
+                        AND gc.agent_run_id IS NOT NULL)
+              )
+            RETURNING gc.authorization_source, gc.agent_run_id, gc.review_task_id
             """,
             (command_id,),
         )
         row = cur.fetchone()
         if row is None:
             raise ValueError("GitHub Command 不存在或当前状态不可重新入队")
-        review_task_id = row["review_task_id"]
-        event_key = f"review-commands:{review_task_id}:retry:{uuid4()}"
-        cur.execute(
-            """
-            INSERT INTO outbox_events (event_key, event_type, aggregate_id, payload)
-            VALUES (%s, 'review_commands', %s,
-                    jsonb_build_object('review_task_id', %s, 'command_id', %s))
-            """,
-            (event_key, review_task_id, review_task_id, command_id),
-        )
+        source = row["authorization_source"]
+        agent_run_id = row["agent_run_id"]
+        if source == "policy":
+            event_key = f"github-commands:{agent_run_id}:retry:{uuid4()}"
+            cur.execute(
+                """
+                INSERT INTO outbox_events (event_key, event_type, aggregate_id, payload)
+                VALUES (%s, 'github_commands', %s,
+                        jsonb_build_object('agent_run_id', %s, 'command_id', %s))
+                """,
+                (event_key, agent_run_id, agent_run_id, command_id),
+            )
+        else:
+            review_task_id = row["review_task_id"]
+            event_key = f"review-commands:{review_task_id}:retry:{uuid4()}"
+            cur.execute(
+                """
+                INSERT INTO outbox_events (event_key, event_type, aggregate_id, payload)
+                VALUES (%s, 'review_commands', %s,
+                        jsonb_build_object('review_task_id', %s, 'command_id', %s))
+                """,
+                (event_key, review_task_id, review_task_id, command_id),
+            )
     return event_key
