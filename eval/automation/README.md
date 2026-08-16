@@ -106,8 +106,12 @@ enforce 模式加载策略时，`load_calibrated_policy(for_enforce=True)` 严�
 ## 当前状态（诚实声明）
 
 - **工具链已完成**：两阶段架构、时间切分、近重复防泄漏、阈值曲线、enforce 校验均已实现。
-- **calibration 尚未执行**：`policy.json` 是初始全 disabled 的冻结 artifact；
-  `policy.frozen.json` 需要真实 historical_issues 数据卷 + production-compatible prediction
-  并人工复核后才能作为 production enforce 依据。
-- 当前生产默认 `AUTOMATION_MODE=shadow`，即使有冻结 policy 也不会自动写回，
-  直到 calibration 被人工确认。
+- **真实数据已接入**（P1）：从用户 `issueflow` 数据卷只读构建了
+  DEV 2013 条 + unseen TEST 504 条（见 `P1-DATA-REPORT.md`），
+  时间切分（DEV=较早 80%），排除近重复跨 split；TEST 冻结前未查看。
+- **heuristic_smoke prediction 已生成**（DEV 2013 条，免费），展示工具链工作正常，
+  其 coverage/precision **不代表 production 能力**（confidence 固定 1.0，无阈值区分度）。
+- **production-compatible LLM prediction 未执行**：成本估算约 $0.42（DEV 全量），
+  需用户确认模型后运行；正式 threshold selection 只读取 production prediction artifact。
+- `policy.json` 仍是初始全 disabled 的冻结 artifact；正式 freeze 需 production prediction + 人工复核。
+- 当前生产默认 `AUTOMATION_MODE=shadow`，即使有冻结 policy 也不会自动写回。

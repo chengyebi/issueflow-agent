@@ -20,6 +20,8 @@ import json
 import random
 from pathlib import Path
 
+from psycopg.rows import dict_row
+
 from app.core.config import get_settings
 from app.db.connection import connect
 
@@ -28,8 +30,10 @@ from schema import CORE_LABEL_MAP, DatasetManifest, ExcludedItem, GroundTruthIte
 SCHEMA_VERSION = "1.0"
 
 # 生命周期标签：不代表 category，出现时该 Issue 不应作为 category ground truth。
+# 注意：question / doc 是核心分类标签，绝不能作为生命周期标签排除。
 _LIFECYCLE_LABELS = {
     "duplicate",
+    "*duplicate",
     "invalid",
     "wontfix",
     "won't fix",
@@ -37,7 +41,6 @@ _LIFECYCLE_LABELS = {
     "by design",
     "needs-info",
     "needs more info",
-    "question",
 }
 
 
@@ -136,7 +139,7 @@ def build_dataset(
     items: list[GroundTruthItem] = []
     exclusions: list[ExcludedItem] = []
 
-    with connect(row_factory=dict) as conn, conn.cursor() as cur:
+    with connect(row_factory=dict_row) as conn, conn.cursor() as cur:
         for repo in repos:
             rows = _fetch_issues(cur, repo, state, limit_per_repo)
             for row in rows:

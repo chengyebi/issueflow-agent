@@ -10,11 +10,23 @@
 
 from pydantic import BaseModel, Field
 
+# 真实仓库核心分类标签（统一小写键）-> category。
+# 映射必须基于本仓库历史数据的实际标签体系（P1 只读统计确认）：
+#   microsoft/vscode: bug, feature-request
+#   nodejs/node:      question, feature request, confirmed-bug, doc
+#   rust-lang/rust:   C-bug
+# 反向映射（category -> 推荐 GitHub label）供预测 artifact 使用。
 CORE_LABEL_MAP = {
     "bug": "bug",
     "enhancement": "feature",
+    "feature": "feature",
     "question": "question",
     "documentation": "documentation",
+    "c-bug": "bug",
+    "confirmed-bug": "bug",
+    "feature-request": "feature",
+    "feature request": "feature",
+    "doc": "documentation",
 }
 
 CORE_LABEL_REVERSE = {
