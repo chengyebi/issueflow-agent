@@ -33,7 +33,10 @@ class IssueAgentRequest(BaseModel):
 
 
 class ReviewDraft(BaseModel):
-    missing_repro_fields: list[str] = Field(description="当前 Issue 缺少的复现信息")
+    needs_clarification: bool = Field(
+        description="现有信息是否不足以让维护者理解核心诉求或采取下一步"
+    )
+    missing_repro_fields: list[str] = Field(description="真正阻碍下一步处理的缺失信息")
     summary: str = Field(description="给维护者看的简洁摘要")
     suggested_reply: str = Field(description="建议回复给 Issue 提交者的内容")
     # 信息完整性判断的独立置信度，与 triage category 置信度分离（P1.5）。
@@ -67,6 +70,7 @@ class IssueAgentResponse(BaseModel):
     priority: Priority
     risk_level: RiskLevel
     confidence: float
+    needs_clarification: bool = False
     missing_info_confidence: float = 0.0
     missing_repro_fields: list[str]
     summary: str
@@ -96,6 +100,7 @@ class IssueAgentState(TypedDict, total=False):
     priority: Priority
     risk_level: RiskLevel
     confidence: float
+    needs_clarification: bool
     missing_repro_fields: list[str]
     summary: str
     suggested_reply: str
@@ -281,9 +286,29 @@ def draft_review(state: IssueAgentState) -> dict:
         [
             (
                 "system",
-                """你负责检查 GitHub Issue 的信息完整性。
-对于 bug，检查运行环境、软件版本、复现步骤、预期结果、实际结果和错误日志。
-只列出缺失信息，并为维护者生成简洁摘要。
+                """你负责判断 GitHub Issue 的现有信息是否足以让维护者理解核心诉求并采取下一步。
+
+不要因为某些额外信息“可能有帮助”就要求用户补充。
+只有缺少的信息已经实际阻碍理解、复现、判断需求或采取下一步时，
+needs_clarification 才为 true。
+
+按 Issue 类型判断，而不是套统一模板：
+- bug：关注定位问题真正需要的环境、版本、复现条件、预期/实际结果和关键日志；
+  不要求每一项必须存在，已有信息足以开始定位时不要追问。
+- feature：关注动机、目标、期望行为或验收标准是否已经清楚；
+  不要索要与需求无关的运行环境、软件版本、错误日志或 bug 复现信息。
+- documentation：关注需要修改什么文档、哪里不清楚以及期望结果是否明确。
+- question：关注问题本身和必要上下文是否足以回答。
+- other：根据实际诉求判断，不机械套用 bug 模板。
+
+如果 needs_clarification=false：
+missing_repro_fields 必须为空。
+
+如果 needs_clarification=true：
+missing_repro_fields 只列出真正阻碍下一步处理的最少必要信息，
+不要列“有则更好”的信息。
+
+为维护者生成简洁摘要。
 不要生成关闭 Issue 或修改代码的建议，不要生成对外回复正文。""",
             ),
             (
@@ -295,7 +320,15 @@ def draft_review(state: IssueAgentState) -> dict:
         ],
     )
     # suggested_reply 保留为内部辅助信息，但不自动变成对外动作。
-    return result.model_dump()
+    data = result.model_dump()
+
+    # “还能补充信息”不等于“必须追问”。
+    # needs_clarification=false 时，确定性地禁止缺失信息触发公开评论。
+    if not data["needs_clarification"]:
+        data["missing_repro_fields"] = []
+        data["missing_info_confidence"] = 0.0
+
+    return data
 
 
 @trace_node("prepare_actions")
@@ -340,7 +373,10 @@ def prepare_actions(state: IssueAgentState) -> dict:
     # 独立 confidence 仅为可观测记录，不能开启其自动执行。
     missing_info_confidence = float(state.get("missing_info_confidence", 0.0))
     missing_fields = list(state.get("missing_repro_fields") or [])
-    if missing_fields:
+    needs_clarification = bool(
+        state.get("needs_clarification", bool(missing_fields))
+    )
+    if needs_clarification and missing_fields:
         try:
             comment = render_missing_information_comment(missing_fields)
         except ValueError:

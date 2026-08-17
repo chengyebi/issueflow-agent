@@ -104,7 +104,10 @@ def test_langgraph_duplicate_path_reaches_human_review_without_public_commands(
             )
         if schema is ReviewDraft:
             return ReviewDraft(
-                missing_repro_fields=[], summary="summary", suggested_reply="reply"
+                needs_clarification=False,
+                missing_repro_fields=[],
+                summary="summary",
+                suggested_reply="reply",
             )
         raise AssertionError(schema)
 

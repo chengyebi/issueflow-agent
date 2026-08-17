@@ -12,9 +12,17 @@ from app.github_client import (
     post_issue_comment,
 )
 from app.services.automation_router import save_completed_run_and_route
+from app.services.outbox import dispatch_event
 from app.services.traces import DatabaseTraceRecorder
 
 DATABASE_URL = get_settings().database_url
+
+
+def _dispatch_route_outbox(outbox_event_key: str | None) -> None:
+    """路由事务提交后，立即尝试派发新建的 Outbox 事件。"""
+    if outbox_event_key:
+        dispatch_event(outbox_event_key)
+
 
 def process_issue_agent_run(agent_run_id: int) -> dict:
     # 第一步：查询任务对应的 Issue，并把任务标记为 running
@@ -95,7 +103,7 @@ def process_issue_agent_run(agent_run_id: int) -> dict:
         result = response.model_dump(mode="json")
 
         # 第四步：成功后保存结果并按 automation mode 路由
-        save_completed_run_and_route(
+        outcome = save_completed_run_and_route(
             agent_run_id=agent_run_id,
             result=result,
             duration_ms=round((time.perf_counter() - started) * 1000),
@@ -104,6 +112,11 @@ def process_issue_agent_run(agent_run_id: int) -> dict:
                 trace.input_tokens, trace.output_tokens
             ),
         )
+
+        # save_completed_run_and_route 已经完成数据库事务提交。
+        # AUTO_EXECUTE 如果创建了 github_commands Outbox，
+        # 此处立即尝试投递到 RQ；失败时仍由 Outbox 保留恢复能力。
+        _dispatch_route_outbox(outcome.outbox_event_key)
 
         return result
 
