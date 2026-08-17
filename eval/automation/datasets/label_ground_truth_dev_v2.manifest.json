@@ -1,0 +1,44 @@
+{
+  "dataset_version": "v2",
+  "split_strategy": "repo_category_stratified_time",
+  "near_dup_grouping": "title-token-jaccard",
+  "near_dup_jaccard_threshold": 0.6,
+  "split": "dev",
+  "item_count": 2011,
+  "per_repo_category_counts": {
+    "microsoft/vscode": {
+      "feature": 143,
+      "bug": 343
+    },
+    "nodejs/node": {
+      "bug": 98,
+      "question": 132,
+      "feature": 126,
+      "documentation": 81
+    },
+    "rust-lang/rust": {
+      "bug": 1088
+    }
+  },
+  "per_category_counts": {
+    "feature": 269,
+    "bug": 1529,
+    "question": 132,
+    "documentation": 81
+  },
+  "created_at_min": "2015-05-28 17:37:18+00:00",
+  "created_at_max": "2026-03-19 03:36:52+00:00",
+  "near_dup_group_count": 2415,
+  "cross_split_group_count": 0,
+  "dataset_hash": "4781c8c7752297d8f92c938bc78653d9cb8d154025d894ecbd71d0e06a346a46",
+  "excluded_count": 3968,
+  "exclusion_reasons": {
+    "labels 缺少唯一核心分类（[]）": 3593,
+    "存在生命周期标签（duplicate/invalid/wontfix 等）": 351,
+    "labels 缺少唯一核心分类（['bug', 'question']）": 1,
+    "labels 缺少唯一核心分类（['documentation', 'feature']）": 10,
+    "labels 缺少唯一核心分类（['documentation', 'question']）": 7,
+    "labels 缺少唯一核心分类（['feature', 'question']）": 4,
+    "labels 缺少唯一核心分类（['bug', 'documentation']）": 2
+  }
+}
