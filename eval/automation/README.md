@@ -107,11 +107,16 @@ enforce 模式加载策略时，`load_calibrated_policy(for_enforce=True)` 严�
 ## 当前状态（诚实声明）
 
 - **工具链已完成**：两阶段架构、repo+category 分层时间切分、Jaccard near-dup 防泄漏、
-  仓库级 label resolver、阈值曲线、enforce 校验均已实现。
-- **真实数据已接入**（P1.6）：从用户 `issueflow` 数据卷只读构建了 v2
+  仓库级 label resolver、ground-truth label 独立、阈值曲线、enforce 校验均已实现。
+- **真实数据已接入**（P1.10）：从用户 `issueflow` 数据卷只读构建了 v3
   DEV 2011 条 + unseen TEST 506 条（见 `P1-DATA-REPORT.md`），
   四类都进入 DEV 与 TEST；near-dup 2415 groups 全部不跨 split；TEST 冻结前未查看。
-- **v1 数据集已废弃**（旧 TEST 只有 bug+feature），移至 `datasets/deprecated/`。
+- **v1 / v2 数据集已废弃**，移至 `datasets/deprecated/`。
+- **P1.7 group_id 已持久化**：JSONL 验证 `group_id IS NULL = 0`，DEV/TEST group 交集为空。
+- **P1.9 ground-truth label 独立**：`expected_label` 来自 `source_labels` 真实 label，
+  与 production resolver 完全分离；`ambiguous_concrete_label_count = 24`（已排除）。
+- **P1.8 unsupported category 已修复**：已知语义分类但 resolver 无映射 → DEFER(UNSUPPORTED_ACTION)，
+  不再误判 NO_ACTION。
 - **production-compatible LLM prediction 未执行**：成本估算约 $0.42（DEV 全量），
   需用户确认模型后运行；正式 threshold selection 只读取 production prediction artifact。
 - **仓库级 label resolver（P1.3）已实现**：Agent 只输出 category，具体 label 由

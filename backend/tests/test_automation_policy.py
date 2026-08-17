@@ -85,6 +85,7 @@ class _Result:
         proposed_actions=None,
         repo="owner/repo",
         issue_number=1,
+        category=None,
     ):
         self.risk_level = risk_level
         self.retrieval_degraded = retrieval_degraded
@@ -92,6 +93,7 @@ class _Result:
         self.proposed_actions = proposed_actions or []
         self.repo = repo
         self.issue_number = issue_number
+        self.category = category
 
 
 def _label_action(confidence=0.95, evidence=None):
@@ -343,6 +345,48 @@ class TestNoAction:
         assert decision.disposition == AutomationDisposition.NO_ACTION
         assert decision.actions == []
         assert decision.handoff is None
+
+    def test_category_other_no_action_stays_no_action(self):
+        """category=other 且无动作 -> NO_ACTION（P1.8 必须保持）。"""
+        decision = decide_automation(
+            _Result(category="other", proposed_actions=[]),
+            mode="enforce",
+            calibrated_policy=_policy(),
+        )
+        assert decision.disposition == AutomationDisposition.NO_ACTION
+
+
+class TestUnsupportedActionDefers:
+    """P1.8：已知语义分类但 resolver 无映射 -> DEFER，不能 NO_ACTION。"""
+
+    def test_rust_feature_defers(self):
+        decision = decide_automation(
+            _Result(repo="rust-lang/rust", category="feature", proposed_actions=[]),
+            mode="enforce",
+            calibrated_policy=_policy(),
+        )
+        assert decision.disposition == AutomationDisposition.DEFER
+        assert decision.handoff.reason_code == DeferReasonCode.UNSUPPORTED_ACTION
+        assert "rust-lang/rust" in decision.handoff.reason
+        assert "feature" in decision.handoff.reason
+
+    def test_rust_documentation_defers(self):
+        decision = decide_automation(
+            _Result(repo="rust-lang/rust", category="documentation", proposed_actions=[]),
+            mode="enforce",
+            calibrated_policy=_policy(),
+        )
+        assert decision.disposition == AutomationDisposition.DEFER
+        assert decision.handoff.reason_code == DeferReasonCode.UNSUPPORTED_ACTION
+
+    def test_unknown_repo_defers(self):
+        decision = decide_automation(
+            _Result(repo="unknown/repo", category="bug", proposed_actions=[]),
+            mode="enforce",
+            calibrated_policy=_policy(),
+        )
+        assert decision.disposition == AutomationDisposition.DEFER
+        assert decision.handoff.reason_code == DeferReasonCode.UNSUPPORTED_ACTION
 
 
 class TestShadowMode:

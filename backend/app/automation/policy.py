@@ -17,6 +17,10 @@ from app.automation.models import (
     HumanHandoff,
 )
 from app.automation.policy_loader import CalibratedPolicy
+from app.automation.repo_labels import resolve_category_label
+
+# 已知语义分类：若属于这些分类但 resolver 无映射，必须 DEFER 而非 NO_ACTION。
+KNOWN_SEMANTIC_CATEGORIES = ("bug", "feature", "question", "documentation")
 
 MODE_VALUES = ("off", "shadow", "enforce")
 
@@ -100,7 +104,21 @@ def decide_automation(
             shadow=shadow,
         )
 
-    # 4. 没有待执行动作 -> NO_ACTION。
+    # 4. P1.8：已知语义分类但仓库无已验证 label 映射 -> DEFER(UNSUPPORTED_ACTION)，
+    #    绝不能当作“无事可做”的 NO_ACTION。
+    semantic_category = getattr(result, "category", None)
+    if (
+        semantic_category in KNOWN_SEMANTIC_CATEGORIES
+        and resolve_category_label(getattr(result, "repo", ""), semantic_category) is None
+    ):
+        return AutomationDecision(
+            disposition=AutomationDisposition.DEFER,
+            policy_version=_policy_version(calibrated_policy),
+            handoff=_unsupported_action_handoff(result, semantic_category),
+            shadow=shadow,
+        )
+
+    # 5. 没有待执行动作 -> NO_ACTION。
     actions = [
         action
         for action in result.proposed_actions
@@ -200,6 +218,25 @@ def decide_automation(
 
 def _policy_version(policy: CalibratedPolicy | None) -> str:
     return policy.policy_version if policy is not None else "no-policy"
+
+
+def _unsupported_action_handoff(result, category: str) -> HumanHandoff:
+    repo = getattr(result, "repo", "")
+    return HumanHandoff(
+        reason_code=DeferReasonCode.UNSUPPORTED_ACTION,
+        reason=(
+            f"当前仓库 {repo} 没有经过验证的 {category} -> GitHub label 映射，"
+            "系统不能安全自动添加标签。"
+        ),
+        human_task=(
+            f"确认 {repo} 中 {category} 类 Issue 应使用的实际标签名称。"
+        ),
+        evidence=[
+            f"repo: {repo}",
+            f"category: {category}",
+        ],
+        already_checked=["已完成语义分类", "已完成仓库级 label 映射查询"],
+    )
 
 
 def _duplicate_handoff(result, candidate) -> HumanHandoff:

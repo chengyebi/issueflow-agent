@@ -216,6 +216,7 @@ class TestNearDuplicateGrouping:
             title=title,
             category="bug",
             expected_label="bug",
+            source_labels=["bug"],
             github_created_at="2026-01-01T00:00:00Z",
         )
 
@@ -240,6 +241,85 @@ class TestNearDuplicateGrouping:
         a = "login button does not work"
         b = "login button does not work anymore"
         assert abs(_title_jaccard(a, b) - _title_jaccard(b, a)) < 1e-9
+
+
+class TestGroundTruthLabelIndependence:
+    """P1.9：expected_label 来自 source_labels，与 production resolver 独立。"""
+
+    def test_ground_truth_parser_uses_source_labels(self):
+        """ground truth 解析：C-bug 历史 label -> category bug + expected_label C-bug。"""
+        from build_label_ground_truth import _core_category_from_labels
+
+        category, concrete = _core_category_from_labels(
+            "rust-lang/rust", ["C-bug", "T-compiler"]
+        )
+        assert category == "bug"
+        assert concrete == "C-bug"
+
+    def test_resolver_wrong_label_but_category_right_is_wrong(self):
+        """P1.9 adversarial：resolver 返回错误 label（enhancement）即使 category 对也算 WRONG。"""
+        # 模拟：历史 label feature-request -> category feature（ground truth）
+        # production resolver 故意返回 enhancement（本应 feature-request）
+        predictions = [
+            {
+                "repo": "microsoft/vscode",
+                "issue_number": 10,
+                "true_category": "feature",
+                "predicted_category": "feature",
+                "expected_label": "feature-request",  # 来自 source_labels 的真实 label
+                "resolved_label": "enhancement",  # production resolver 配置错误
+                "raw_confidence": 1.0,
+                "action_intent": "add_category_label",
+                "model_name": "test",
+                "prompt_version": "t",
+                "input_hash": "h",
+                "runner_type": "heuristic_smoke",
+            }
+        ]
+        pred_path = _write_predictions(predictions)
+        policy_path = _temporary_policy(threshold=0.0, allow_auto=True)
+        report = run_eval(pred_path, policy_path)
+        assert report["auto_execute_count"] == 1
+        assert report["error_auto_execute_count"] == 1
+        assert report["auto_action_precision"] == 0.0
+
+
+class TestGroupIdPersistence:
+    """P1.7：读取实际生成的 JSONL，确认 group_id 已持久化。"""
+
+    @staticmethod
+    def _read_jsonl(path):
+        items = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    items.append(json.loads(line))
+        return items
+
+    def test_dataset_jsonl_has_group_id(self):
+        dataset_path = EVAL / "datasets" / "label_ground_truth_dev_v3.jsonl"
+        if not dataset_path.exists():
+            import pytest as _pt
+
+            _pt.skip("v3 dataset 尚未生成")
+        items = self._read_jsonl(dataset_path)
+        assert items, "dataset 不应为空"
+        assert all(item.get("group_id") is not None for item in items), (
+            "JSONL 中存在 group_id 为 null 的 item"
+        )
+
+    def test_expected_label_from_source_labels(self):
+        dataset_path = EVAL / "datasets" / "label_ground_truth_dev_v3.jsonl"
+        if not dataset_path.exists():
+            import pytest as _pt
+
+            _pt.skip("v3 dataset 尚未生成")
+        items = self._read_jsonl(dataset_path)
+        for item in items:
+            assert item["expected_label"] in item["source_labels"], (
+                f"expected_label {item['expected_label']!r} 不在 source_labels 中"
+            )
 
 
 class TestDamagedPolicyFailClosed:

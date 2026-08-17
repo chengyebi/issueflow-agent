@@ -1,4 +1,4 @@
-"""从 historical_issues 构建 category label ground truth 数据集（v2）。
+"""从 historical_issues 构建 category label ground truth 数据集（v3）。
 
 P1.1 分层切分：
 - 每个 (repo, category) bucket 内按时间排序，较早 80% -> DEV、较新 20% -> TEST；
@@ -7,12 +7,16 @@ P1.1 分层切分：
 
 P1.2 near-duplicate grouping：
 - 使用 normalized-title token Jaccard（阈值写入 manifest），非 semantic embedding；
-- group id 写入 dataset item；同一 group 不允许横跨 DEV/TEST；
+- group id 写入 dataset item（P1.7 修复持久化）；同一 group 不允许横跨 DEV/TEST；
 - 不使用 TEST 预测结果做 grouping。
 
-P1.3：
-- expected_label 由仓库级 category->label 映射（repo_labels.REPO_CATEGORY_LABELS）决定；
-- 无验证映射的 (repo, category) 不作为 label ground truth（exclude）。
+P1.7 group_id 持久化：
+- selected 通过列表推导真正重建为带 group_id 的副本，验证 JSONL 中 group_id 非空。
+
+P1.9 ground truth 独立性：
+- expected_label 必须来自 source_labels 中维护者实际使用的 concrete label，
+  绝不来自 production RepoLabelResolver（避免自证循环）；
+- concrete-label ambiguous（同 category 多个不同 label）样本排除并记录。
 """
 
 import argparse
@@ -24,15 +28,16 @@ from pathlib import Path
 
 from psycopg.rows import dict_row
 
-from app.automation.repo_labels import REPO_CATEGORY_LABELS
 from app.core.config import get_settings
 from app.db.connection import connect
+
+from schema import REPO_GROUND_TRUTH_LABELS
 
 from schema import DatasetManifest, ExcludedItem, GroundTruthItem
 
 SCHEMA_VERSION = "1.0"
 SPLIT_STRATEGY = "repo_category_stratified_time"
-DATASET_VERSION = "v2"
+DATASET_VERSION = "v3"
 NEAR_DUP_JACCARD_THRESHOLD = 0.6
 NEAR_DUP_GROUPING = "title-token-jaccard"
 
@@ -82,25 +87,38 @@ def _labels_of(row) -> list[str]:
     return [str(item) for item in labels]
 
 
-def _core_category(labels: list[str]) -> tuple[str | None, list[str]]:
-    """从 labels 推导单一核心分类（基于真实标签体系）。
+def _core_category_from_labels(repo: str, labels: list[str]) -> tuple[str | None, str | None]:
+    """从历史维护者 labels 解析 ground truth（P1.9）。
 
-    返回 (category, mapped_labels)。若冲突或缺失返回 (None, [])。
+    返回 (category, concrete_label)：
+    - concrete_label 是 source_labels 中实际出现的、映射到该 category 的原始 label
+      （保留真实 GitHub spelling，如 "C-bug"）。
+    - 若同一 category 有多个不同的 concrete label（concrete-label ambiguity），
+      返回 (None, None)，调用方记录 AMBIGUOUS_CONCRETE_LABEL 排除。
+    - 绝不使用 production RepoLabelResolver（避免自证循环）。
     """
-    norm_lower = [label.strip().lower() for label in labels]
-    mapped = []
-    for norm in norm_lower:
-        if norm == "bug" or norm == "c-bug" or norm == "confirmed-bug":
-            mapped.append("bug")
-        elif norm == "enhancement" or norm == "feature" or norm == "feature-request" or norm == "feature request":
-            mapped.append("feature")
-        elif norm == "question":
-            mapped.append("question")
-        elif norm == "documentation" or norm == "doc":
-            mapped.append("documentation")
-    if len(mapped) == 1:
-        return mapped[0], mapped
-    return None, mapped
+    repo_rules = REPO_GROUND_TRUTH_LABELS.get(repo, {})
+    categories: dict[str, list[str]] = {}
+    for label in labels:
+        # 精确匹配真实 label 原文（保留大小写）。
+        category = repo_rules.get(label)
+        if category is None:
+            continue
+        categories.setdefault(category, []).append(label)
+
+    if len(categories) != 1:
+        return None, None
+    category = next(iter(categories))
+    concrete_labels = set(categories[category])
+    if len(concrete_labels) != 1:
+        return None, None  # AMBIGUOUS_CONCRETE_LABEL
+    return category, next(iter(concrete_labels))
+
+
+def _has_any_ground_truth_label(repo: str, labels: list[str]) -> bool:
+    """labels 中是否存在任何能映射到 semantic category 的 ground truth label。"""
+    repo_rules = REPO_GROUND_TRUTH_LABELS.get(repo, {})
+    return any(label in repo_rules for label in labels)
 
 
 def _title_tokens(title: str) -> set[str]:
@@ -158,7 +176,6 @@ def build_dataset(
     with connect(row_factory=dict_row) as conn, conn.cursor() as cur:
         for repo in repos:
             rows = _fetch_issues(cur, repo, limit_per_repo)
-            repo_rules = REPO_CATEGORY_LABELS.get(repo, {})
             for row in rows:
                 labels = _labels_of(row)
                 if _is_excluded_lifecycle_label(labels):
@@ -170,30 +187,27 @@ def build_dataset(
                         )
                     )
                     continue
-                category, mapped = _core_category(labels)
-                if category is None:
-                    exclusions.append(
-                        ExcludedItem(
-                            repo=row["repo"],
-                            issue_number=row["issue_number"],
-                            reason=(
-                                "labels 缺少唯一核心分类"
-                                f"（{sorted(mapped)}）"
-                            ),
+                # P1.9：ground truth 来自 source_labels 的真实 concrete label，
+                # 与 production resolver 完全独立。
+                category, concrete_label = _core_category_from_labels(repo, labels)
+                if category is None and concrete_label is None:
+                    # 区分：无核心分类 与 concrete-label ambiguous。
+                    if _has_any_ground_truth_label(repo, labels):
+                        exclusions.append(
+                            ExcludedItem(
+                                repo=row["repo"],
+                                issue_number=row["issue_number"],
+                                reason="AMBIGUOUS_CONCRETE_LABEL（同 category 多个具体 label）",
+                            )
                         )
-                    )
-                    continue
-                expected_label = repo_rules.get(category)
-                if expected_label is None:
-                    exclusions.append(
-                        ExcludedItem(
-                            repo=row["repo"],
-                            issue_number=row["issue_number"],
-                            reason=(
-                                f"仓库 {repo} 无 {category} 的已验证 label 映射"
-                            ),
+                    else:
+                        exclusions.append(
+                            ExcludedItem(
+                                repo=row["repo"],
+                                issue_number=row["issue_number"],
+                                reason="labels 缺少唯一核心分类",
+                            )
                         )
-                    )
                     continue
                 items.append(
                     GroundTruthItem(
@@ -202,7 +216,7 @@ def build_dataset(
                         title=row["title"] or "",
                         body=row["body"] or "",
                         category=category,
-                        expected_label=expected_label,
+                        expected_label=concrete_label,
                         source_labels=labels,
                         state=row.get("state") or "open",
                         github_created_at=str(row["github_created_at"] or ""),
@@ -251,11 +265,16 @@ def build_dataset(
         dev_items.extend(dev_bucket)
         test_items.extend(test_bucket)
 
-    selected = dev_items if split == "dev" else test_items
-    for item in selected:
-        item = item.model_copy(
+    # P1.7：真正重建 selected 列表，让 group_id 持久化到每个 item。
+    selected = [
+        item.model_copy(
             update={"group_id": group_id_of[(item.repo, item.issue_number)]}
         )
+        for item in (dev_items if split == "dev" else test_items)
+    ]
+    # 验证：所有 item 的 group_id 非空。
+    if any(item.group_id is None for item in selected):
+        raise RuntimeError("dataset 中存在 group_id 为空的 item")
 
     # 计算 SHA-256。
     payload = json.dumps(
@@ -266,11 +285,14 @@ def build_dataset(
     dataset_hash = hashlib.sha256(payload).hexdigest()
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = out_dir / f"label_ground_truth_{split}_v2.jsonl"
+    manifest_path = out_dir / f"label_ground_truth_{split}_v3.jsonl"
     with manifest_path.open("w", encoding="utf-8") as f:
         for item in selected:
             f.write(json.dumps(item.model_dump(), ensure_ascii=False) + "\n")
 
+    ambiguous_count = _count_exclusions(exclusions).get(
+        "AMBIGUOUS_CONCRETE_LABEL（同 category 多个具体 label）", 0
+    )
     stats = {
         "dataset_version": DATASET_VERSION,
         "split_strategy": SPLIT_STRATEGY,
@@ -278,6 +300,8 @@ def build_dataset(
         "near_dup_jaccard_threshold": NEAR_DUP_JACCARD_THRESHOLD,
         "split": split,
         "item_count": len(selected),
+        "group_id_persisted": all(item.group_id is not None for item in selected),
+        "ambiguous_concrete_label_count": ambiguous_count,
         "per_repo_category_counts": _per_repo_category(selected),
         "per_category_counts": _per_category(selected),
         "created_at_min": min((x.github_created_at for x in selected), default=""),
@@ -289,7 +313,7 @@ def build_dataset(
         "exclusion_reasons": _count_exclusions(exclusions),
     }
 
-    meta_path = out_dir / f"label_ground_truth_{split}_v2.manifest.json"
+    meta_path = out_dir / f"label_ground_truth_{split}_v3.manifest.json"
     meta_path.write_text(
         json.dumps(stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -330,7 +354,7 @@ def _count_exclusions(exclusions: list[ExcludedItem]) -> dict[str, int]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="构建 label ground truth 数据集 v2")
+    parser = argparse.ArgumentParser(description="构建 label ground truth 数据集 v3")
     parser.add_argument("--repos", default=get_settings().eval_repos)
     parser.add_argument("--limit-per-repo", type=int, default=5000)
     parser.add_argument("--split", choices=["dev", "test"], default="dev")

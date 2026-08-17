@@ -49,6 +49,7 @@ class _ResultView:
         self.duplicate_assessment = result.get("duplicate_assessment") or {}
         self.repo = result.get("repo", "")
         self.issue_number = result.get("issue_number", 0)
+        self.category = result.get("category")
         self.proposed_actions = [
             AutomationAction.model_validate(action)
             for action in result.get("proposed_actions", [])

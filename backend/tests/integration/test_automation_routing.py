@@ -97,7 +97,7 @@ def _comment_action():
 
 def _result(**overrides):
     base = {
-        "repo": "owner/repo",
+        "repo": "microsoft/vscode",
         "issue_number": 1,
         "category": "bug",
         "priority": "medium",
@@ -179,7 +179,7 @@ def test_enforce_auto_execute_creates_policy_command_no_review(
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12345)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12345)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -233,7 +233,7 @@ def test_enforce_defer_creates_review_task_and_human_command(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12346)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12346)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -275,7 +275,7 @@ def test_shadow_mode_records_decision_but_routes_human(monkeypatch, tmp_path):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "shadow")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12347)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12347)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -307,7 +307,7 @@ def test_no_action_routes_to_no_review(monkeypatch, tmp_path):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12348)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12348)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -333,7 +333,7 @@ def test_off_mode_completely_keeps_review_all_behavior(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "off")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12349)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12349)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -363,7 +363,7 @@ def test_auto_execute_uses_outbox_github_commands(monkeypatch, tmp_path):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12350)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12350)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -390,7 +390,7 @@ def test_requeue_failed_policy_command(monkeypatch, tmp_path):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12351)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12351)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -423,7 +423,7 @@ def test_human_approved_command_stays_compatible(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "off")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12353)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12353)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -459,7 +459,7 @@ def test_human_approved_command_stays_compatible(monkeypatch):
         result = process_github_command(command_id)
         assert result["status"] == "executed"
         assert captured["label"] == "bug"
-        assert captured["repo"] == "owner/repo"
+        assert captured["repo"] == "microsoft/vscode"
         assert captured["issue_number"] == 12353
     finally:
         _delete_agent_run(agent_run_id)
@@ -471,7 +471,7 @@ def test_policy_command_executes_through_worker(monkeypatch, tmp_path):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12354)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12354)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
@@ -495,14 +495,14 @@ def test_policy_command_executes_through_worker(monkeypatch, tmp_path):
         result = process_github_command(command_id)
         assert result["status"] == "executed"
         assert captured["label"] == "bug"
-        assert captured["repo"] == "owner/repo"
+        assert captured["repo"] == "microsoft/vscode"
     finally:
         _delete_agent_run(agent_run_id)
 
 
 def test_legacy_data_backfilled_as_human_authorized(monkeypatch):
     """模拟 migration 回填：旧式（review_task_id 非空、source NULL）命令回填为 human 授权。"""
-    agent_run_id = _insert_agent_run("owner/repo", 12355)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12355)
     try:
         with connect(row_factory=dict_row) as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute(
@@ -564,7 +564,7 @@ def test_policy_route_idempotent_no_duplicate_side_effect(monkeypatch, tmp_path)
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12360)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12360)
     try:
         first = save_completed_run_and_route(
             agent_run_id,
@@ -608,7 +608,7 @@ def test_human_route_idempotent(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "off")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12361)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12361)
     try:
         first = save_completed_run_and_route(
             agent_run_id,
@@ -640,7 +640,7 @@ def test_worker_rejects_unauthorized_command(monkeypatch, tmp_path):
     settings = get_settings()
     monkeypatch.setattr(settings, "automation_mode", "enforce")
 
-    agent_run_id = _insert_agent_run("owner/repo", 12352)
+    agent_run_id = _insert_agent_run("microsoft/vscode", 12352)
     try:
         outcome = save_completed_run_and_route(
             agent_run_id,
