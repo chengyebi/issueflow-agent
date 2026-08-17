@@ -13,9 +13,11 @@ This project focuses on **selective automation**: **the model proposes, the poli
 - 项目类型：工作流型 Agent（LangGraph workflow），非无约束通用 Agent
 - 核心原则：确定性 Policy Gate 决定哪些动作可自动执行；人工只处理 Agent 无法可靠判断的最小问题
 - Rollout：默认 `AUTOMATION_MODE=shadow`；`off` / `shadow` / `enforce` 三档，enforce 缺少冻结策略时 fail-closed
-- 评估状态：Retrieval Evaluation 已按冻结协议在 held-out TEST 集上完成；**Automation calibration 尚未执行**（当前 policy 全部 intent 均 disabled），覆盖率/精度尚无可发布数字
+- 评估状态：Retrieval Evaluation 与 Label Automation Calibration 均已按冻结协议完成 held-out TEST；自动标签已有冻结策略与可发布离线指标。正式默认 rollout 仍保持 `AUTOMATION_MODE=shadow`，不会默认无人写入 GitHub
 
 ## Evaluation Snapshot
+
+### Retrieval
 
 历史 Issue 查重检索在 **maintainer-derived positive duplicate-relation retrieval benchmark** 上按冻结协议评测：
 
@@ -24,6 +26,22 @@ This project focuses on **selective automation**: **the model proposes, the poli
 - `vector_head512` 的 TEST macro nDCG point estimate **0.6353** 小幅高于 frozen primary，但 TEST 不用于回选方法。
 
 完整五方法对比表见 [检索评测](#检索评测)。
+
+### Label Automation
+
+自动标签使用真实维护者标签作为 Ground Truth，并严格执行 **DEV 冻结 → unseen TEST 唯一一次正式评测**：
+
+- DEV **2011** 条、TEST **506** 条；按 repo + category 分层时间切分，near-duplicate group 不跨 split；
+- DEV 上冻结自动执行 threshold **0.92**，冻结策略为 `eval/automation/policy.label.frozen.json`；
+- unseen TEST 上 **198 / 506** 条进入自动标签集合，coverage **39.13%**；
+- auto-action precision **93.94%（186 / 198）**，Wilson 95% CI **[89.71%, 96.50%]**；
+- TEST structured-output failure **0**；预测为 high-risk 的 Issue 全部 DEFER；
+- 当前冻结策略仅允许 `add_category_label` AUTO_EXECUTE；`request_missing_information`、`post_technical_reply`、`duplicate_action` 均未获得自动执行授权。
+
+这些数字只衡量 **label auto-action**，不等价于完整 Agent 准确率、duplicate classification precision 或端到端成功率。
+
+完整自动标签协议、成本和分桶结果见
+[`eval/automation/FINAL-LABEL-AUTOMATION-REPORT.md`](eval/automation/FINAL-LABEL-AUTOMATION-REPORT.md)。
 
 ---
 
@@ -71,10 +89,11 @@ IssueFlow 把整个过程拆成一条受约束的流水线，而不是把钥匙�
 事件接入
 → 验签 / 去重 / 事务入库
 → 后台 Agent 分析
-→ 生成命令草案
-→ 人工审核
-→ Worker 异步写回 GitHub
-→ 保存执行结果
+→ 确定性 Policy Gate
+   ├─ AUTO_EXECUTE → policy 授权 → github_commands Outbox → Worker → GitHub
+   ├─ DEFER        → Exception Queue → Human
+   └─ NO_ACTION    → Done
+→ 保存决策、授权与执行结果
 ```
 
 ## 核心设计
@@ -102,40 +121,55 @@ flowchart TB
 
     subgraph App["Docker Compose 应用"]
         API["FastAPI backend :8000"]
-        PG[("PostgreSQL + pgvector")]
+        DB[("PostgreSQL + pgvector")]
         RD[("Redis 7")]
         Q["RQ Queue"]
         AW["Agent Worker"]
+        PGATE["Deterministic Policy Gate"]
         CW["Command Worker"]
-        UI["Review Console /ui/"]
+        UI["Exception Queue / Review Console"]
     end
 
     GH -->|"issues webhook"| API
-    API -->|"单事务：delivery + event + run + outbox"| PG
-    API -->|"enqueue agent-run"| Q
+    API -->|"事务：delivery + event + run + outbox"| DB
+    API -->|"dispatch agent_run"| Q
+
     Q --> AW
-    AW -->|"LangGraph 分析"| LLM
-    AW -->|"结果 + 审核任务 + 命令草案"| PG
-    UI -->|"GET /review-tasks"| API
-    UI -->|"approve / reject"| API
-    API -->|"approved 写入 outbox"| PG
-    API -->|"enqueue review-commands"| Q
+    AW -->|"LangGraph analysis"| LLM
+    AW --> PGATE
+    PGATE -->|"decision / authorization / command state"| DB
+
+    PGATE -->|"AUTO_EXECUTE: policy command + github_commands Outbox"| DB
+    AW -->|"after commit: dispatch github_commands"| Q
+
+    PGATE -->|"DEFER: review_task + human proposed commands"| DB
+    UI -->|"read pending / approve / reject"| API
+    API -->|"read / update review state"| DB
+    API -->|"approved: review_commands Outbox"| DB
+    API -->|"after commit: dispatch review_commands"| Q
+
+    PGATE -->|"NO_ACTION"| DONE["Done"]
+
     Q --> CW
-    CW -->|"add_label / post_comment"| GH
-    CW -->|"executed / failed"| PG
-    API -->|"GET /historical-issues/search"| PG
-    RD -->|"队列后端"| Q
+    CW -->|"authorized add_label / post_comment"| GH
+    CW -->|"executed / failed"| DB
+
+    API -->|"search / trace / metrics"| DB
+    RD -->|"RQ backend"| Q
 ```
 
 | 组件 | 职责 |
 |---|---|
 | FastAPI backend | 接收 Webhook、提供审核/检索/观测 API、静态托管 Review Console |
-| PostgreSQL | 业务事实、审核状态、命令、检索向量（pgvector）与 Trace |
-| Redis + RQ | 任务队列；Agent 与 Command Worker 从中取任务 |
-| Agent Worker | 执行 LangGraph 分析流程，调用 LLM 生成结构化结果 |
-| Command Worker | 执行批准后的 GitHub 写操作（加标签、发评论） |
-| Review Console | 只读展示 + 决策操作，页面需管理员 Token 解锁 |
+| PostgreSQL | 业务事实、审核状态、AutomationDecision、GitHub Command、检索向量（pgvector）与 Trace |
+| Redis + RQ | 任务队列；Agent 与 Command 执行任务从中消费 |
+| Agent Worker | 执行 LangGraph 分析；完成后按确定性 Policy Gate 路由，并在事务提交后派发后续 Outbox |
+| Deterministic Policy Gate | 使用冻结 policy 对全部 proposed actions 做 fail-closed 决策，不再调用 LLM |
+| Command Worker | 只执行持有合法 `policy` 或 `human` 授权的 GitHub 写操作 |
+| Review Console | 展示需要人工处理的 Review / Exception Queue；enforce 下主要承接 DEFER，shadow 下也承接真实动作的人工作业 |
 | LLM API | 通过 OpenAI-compatible 接口配置，默认 DeepSeek |
+
+> 上图按 `enforce` 的真实 side-effect 路由展示。`shadow` 模式仍记录 Policy Gate 裁定，但除 `NO_ACTION` 外，真实动作继续走人工审核路径。
 
 ## 事件接入与事务一致性
 
@@ -157,23 +191,37 @@ INSERT outbox_events (event_type = 'agent_run')
 
 事务提交后再投递 RQ。投递失败时 Outbox 记录保持 `pending`，由扫描任务按指数退避重试，因此数据库中的任务不会因为 Redis 短时不可用而丢失。这套机制提供**至少一次投递**和本地幂等，不等于跨系统 exactly-once。
 
-Outbox 事件类型：`agent_run`（触发 Agent 分析）、`review_commands`（审核批准后执行命令）、`issue_index`（后台索引历史 Issue）。
+Outbox 事件类型：`agent_run`（触发 Agent 分析）、`github_commands`（AUTO_EXECUTE 后派发 policy 授权命令）、`review_commands`（人工批准后派发命令）、`issue_index`（后台索引历史 Issue）。
 
 ## Agent 工作流
 
 Agent 是代码预先定义路径的工作流型 Agent，节点由 LangGraph `StateGraph` 编排：
 
 ```text
-triage_issue（分类 / 优先级 / 风险 / 置信度）
-→ 风险路由（risk_level == high?）
-→ draft_review（复现信息检查 / 摘要 / 建议回复）
-   或 security_review（高风险：只给安全提示，不生成公开动作）
-→ prepare_actions（生成标签与评论草案）
+retrieve_similar_issues
+→ judge_duplicate
+→ triage_issue（分类 / 优先级 / 风险 / 置信度）
+→ 风险路由
+   ├─ high → security_review → END
+   └─ low / medium
+      → draft_review
+      → prepare_actions
+      → END
 ```
 
-分类结果：`bug` / `feature` / `question` / `documentation` / `other`。标签映射为 `bug`、`enhancement`、`question`、`documentation`；`other` 不自动打标签（“无法归类”不等于“无效 Issue”）。
+分类结果为 `bug` / `feature` / `question` / `documentation` / `other`。具体 GitHub label 不由模型自由生成，而由仓库级 resolver 把 semantic category 映射到真实 label；已知语义分类在目标仓库没有验证映射时，Policy Gate 会 DEFER，而不是当成 NO_ACTION。
 
-高风险分支（漏洞利用、认证绕过、密钥泄露、隐私数据、危险执行）只产出 `NEEDS_SECURITY_REVIEW`，不生成任何公开标签或评论命令，交由维护者人工处理。
+`draft_review` 使用 **category-aware completeness** 判断，而不是统一套 Bug 模板：
+
+- Bug：只关注真正影响定位/复现的环境、版本、复现条件、预期/实际结果和关键日志；
+- Feature：关注动机、目标、期望行为或验收标准，不要求无关的 OS、版本、错误日志；
+- Documentation / Question / Other：按各自实际诉求判断必要上下文。
+
+核心字段是 `needs_clarification`。只有缺失信息已经实际阻碍维护者理解问题或采取下一步时才为 `true`；当它为 `false` 时，代码会确定性清空 `missing_repro_fields` 和 `missing_info_confidence`，避免把“更多信息可能有帮助”误当成“必须公开追问”。
+
+`prepare_actions` 默认不会把内部 `suggested_reply` 自动发布。普通 Issue 可以只产生 category label；只有 `needs_clarification=true` 且存在真正阻塞处理的最小缺失字段时，才生成确定性模板的 `request_missing_information` 动作。
+
+高风险分支不生成公开命令，由 Policy Gate fail-closed 交给人工处理。
 
 ## 选择性自动化（Selective Automation）
 
@@ -208,10 +256,15 @@ Command Worker 只执行持有合法授权的命令，否则跳过。
 
 ### 当前自动化边界（诚实声明）
 
-- 默认 `shadow`，**当前没有任何动作实际自动执行**；
-- `eval/automation/policy.json` 为初始冻结 artifact，全部 intent `enabled=false`——calibration 尚未完成；
-- **duplicate 永远 DEFER**：当前 Retriever 离线覆盖率不足，不允许自动关闭/自动认定重复；
-- **security-risk 永远 fail-closed**，自动公开 side effect 为 0。
+- 正式默认 Compose 配置仍为 `AUTOMATION_MODE=shadow`，Worker 的 GitHub 写开关默认 `GITHUB_WRITE_ENABLED=false`；默认启动不会进行 policy 无人写回；
+- 自动标签 calibration 已完成，冻结 artifact 为 `eval/automation/policy.label.frozen.json`，当前只有 `add_category_label` 为 `enabled=true + allow_auto=true`，threshold **0.92**；
+- unseen TEST（506 条）中共有 198 条进入自动标签集合：precision **93.94%**、coverage **39.13%**；这是 label auto-action 指标，不是完整 Agent 准确率；
+- `request_missing_information`、`post_technical_reply`、`duplicate_action` 在冻结策略中仍 disabled；
+- 当前 Policy Gate 是 **Issue-level all-or-nothing**：它逐个检查该 Issue 的全部 proposed actions；任意一个动作未被策略允许、低于阈值或缺少要求的 evidence，整个 Issue 都 DEFER。只有全部动作通过时才 AUTO_EXECUTE；
+- 当前**没有实现 per-action 部分执行**，这是现阶段明确采用的 **Issue-level all-or-nothing** 设计：只要同一 Issue 含有任一未获授权动作，就整单 DEFER；冻结评测报告在评测时点把缺少 per-action authorization 记录为 enforce limitation，README 保留这一历史事实，但不把 per-action 拆分执行写成当前既定设计目标；
+- 目前 enforce 只在受控 E2E 中验证了“单个 Issue 仅包含已校准 label action”时的真实自动写回链路；
+- duplicate 继续 DEFER：Retrieval Evaluation 只证明候选召回/排序能力，不足以授权自动认定或自动关闭重复 Issue；
+- security-risk 永远 fail-closed，不生成自动公开 side effect。
 
 ## 人工接管与 GitHub 写回
 
@@ -377,7 +430,7 @@ HNSW 相对 Exact 的 Top-K 召回率与顺序一致率均为 1.0（当前语料
 | 非目标事件触发 | `event_name` / `action` 白名单，PR 事件忽略 |
 | Prompt Injection | 固定 System Prompt，Issue 文本只作为数据 |
 | 模型自由输出 | Pydantic 结构化输出 + 命令类型白名单 |
-| 未审核自动写入 | Human-in-the-loop；`GITHUB_WRITE_ENABLED=false` 为 Compose 默认 |
+| 未授权 GitHub 写入 | `policy` / `human` 双授权 + 命令白名单；Worker 默认 `GITHUB_WRITE_ENABLED=false` 作为外部写入 kill switch |
 | 高风险内容公开 | 高风险分支不生成公开命令 |
 | Token 权限过大 | Fine-grained PAT，仅授权指定仓库 Issues 写权限 |
 | 重复审核 / 重复命令 | `SELECT FOR UPDATE` + 唯一 `idempotency_key` |
@@ -425,7 +478,7 @@ issueflow-agent/
 │   ├── Dockerfile
 │   ├── requirements.txt / requirements-dev.txt
 │   ├── alembic.ini
-│   ├── migrations/          # Alembic 迁移（versions/0001..0005）
+│   ├── migrations/          # Alembic 迁移（versions/0001..0006）
 │   └── app/
 │       ├── main.py          # FastAPI 入口，挂载路由与 /ui/
 │       ├── api/             # webhooks / issues / agent / reviews / rag / observability / recovery / evals / health
@@ -439,8 +492,9 @@ issueflow-agent/
 │       └── models/          # 领域模型
 ├── docs/                    # rag.md、reliability.md、评测方法、泄漏边界、长文本策略 等
 ├── eval/
-│   ├── datasets/            # qrels（dev/test）、clusters、snapshots、示例数据
-│   └── reports/             # rag_baseline_dev / rag_dev / rag_frozen_config / rag_primary_method / rag_test
+│   ├── automation/          # 自动标签 DEV/TEST、冻结 policy、预测 artifact、最终报告
+│   ├── datasets/            # Retrieval qrels（dev/test）、clusters、snapshots、示例数据
+│   └── reports/             # Retrieval frozen config / primary method / TEST report
 ├── scripts/                 # 检索评测 / 语料索引 / 真值采集 等 CLI
 ├── database/init/           # 基础 Schema 初始化 SQL（initdb）
 ├── docker-compose.yml
@@ -462,7 +516,7 @@ cp .env.example .env
 
 编辑 `.env` 填写 `GITHUB_WEBHOOK_SECRET`、`LLM_API_KEY`、`GITHUB_TOKEN`，并按需设置 `REVIEW_ADMIN_TOKEN`。`.env` 已被 `.gitignore` 忽略。
 
-Compose 默认 `GITHUB_WRITE_ENABLED=false`，即未显式开启前，系统不会发出任何 GitHub 写请求。
+Compose 默认 `AUTOMATION_MODE=shadow`，Worker 默认 `GITHUB_WRITE_ENABLED=false`。shadow 会计算并记录 Policy Gate 决策，但不会按 policy 路径无人写回；只有显式配置冻结 policy、切到 `enforce` 并开启 GitHub 写开关后，满足策略的动作才可能真实 AUTO_EXECUTE。
 
 ### 3. 启动服务
 
@@ -538,35 +592,91 @@ curl --noproxy '*' \
 
 ## 验证路径
 
-项目曾用自身仓库作为测试仓库，在真实 GitHub Issue 上跑通完整链路：创建 Issue → Webhook 到达 → Agent 判定并生成标签/评论草案 → 人工批准 → Worker 添加标签并发布评论 → 命令状态变为 `executed`。一次真实的端到端写回发生在 [GitHub Issue #5](https://github.com/chengyebi/issueflow-agent/issues/5)：人工批准后，IssueFlow 为它添加 `bug` 标签，并发布批准后的补充信息评论。
+项目使用自身仓库进行真实 GitHub 写回验证，但严格区分 **链路验证** 与 **统计评测**。
+
+### Human-authorized writeback
+
+既有人工授权演示见
+[GitHub Issue #5](https://github.com/chengyebi/issueflow-agent/issues/5)：
+
+```text
+Issue
+→ Webhook
+→ Agent
+→ Review Task
+→ Human approve
+→ review_commands Outbox
+→ Command Worker
+→ GitHub write
+→ executed
+```
+
+该演示用于验证人工审核后的真实 GitHub 写回链路。
 
 ![GitHub Issue 5 showing the bug label and approved follow-up comment written back by IssueFlow](docs/images/github-writeback-demo.png)
 
-*真实端到端写回演示：人工批准后，IssueFlow 为 GitHub Issue #5 添加 `bug` 标签，并发布批准后的补充信息评论。*
+*真实人工授权写回演示。*
 
-检索与评测的验证则以冻结的 DEV/TEST 数据集为准（见 [检索评测](#检索评测)），不使用合成样例冒充真实效果。
+### Policy-authorized AUTO_EXECUTE E2E
+
+随后又在
+[GitHub Issue #8](https://github.com/chengyebi/issueflow-agent/issues/8)
+验证了无人点击 Approve 的 policy 自动授权链路：
+
+```text
+feature / confidence=0.95
+→ needs_clarification=false
+→ proposed action: add_label(enhancement)
+→ frozen label Policy Gate: AUTO_EXECUTE
+→ authorization_source=policy
+→ review_task_id=NULL
+→ github_commands Outbox dispatched
+→ Command Worker
+→ executed
+→ GitHub enhancement label
+```
+
+这次 E2E 使用了**仅测试期间生效、未提交到正式 repo-label resolver 的临时 `chengyebi/issueflow-agent -> enhancement` 映射**，并临时为测试 Worker 设置 `AUTOMATION_MODE=enforce` 与 `GITHUB_WRITE_ENABLED=true`。测试结束后正式 `.env` 恢复为 `AUTOMATION_MODE=shadow`、`GITHUB_WRITE_ENABLED=false`。
+
+因此 #8 证明的是：
+
+```text
+Policy Gate
+→ policy authorization
+→ Transactional Outbox
+→ RQ
+→ Command Worker
+→ GitHub API
+```
+
+这条执行链能够真实闭环；它**不是**冻结 TEST 数据集的一部分，也不表示 `chengyebi/issueflow-agent` 已加入正式校准 repo resolver，更不表示默认部署已经开启无人写入。
+
+Retrieval 和 Label Automation 的可发布数字只来自各自冻结 DEV/TEST 协议，不用单次 E2E 冒充统计精度。
 
 ## 当前边界
 
 - 审核鉴权是最小共享管理员 Token，不是 RBAC / OAuth / IAM，也不区分多用户角色；
-- 崩溃窗口下 GitHub 写操作不能保证 exactly-once，重复评论不自动重放，依赖人工对账；
-- 检索评测是 Retrieval Evaluation，**不宣称**查重分类准确率、Precision、F1 或 Agent 端到端准确率；
-- 未启用 cross-encoder 重排器；RAG 不发送 Issue 内容到外部 Embedding 服务；
+- GitHub 外部写入无法提供跨系统 exactly-once；对无法确认是否成功的非幂等 side effect 不盲目重放，保留状态供人工对账；
+- Label Automation benchmark 只覆盖 semantic triage + repo label resolver + risk gate + `add_category_label`，**不宣称**完整 Agent 准确率；
+- `request_missing_information`、`post_technical_reply` 与 `duplicate_action` 尚未取得独立自动执行 calibration，因此当前冻结 policy 中保持 disabled；
+- 当前自动化决策是 **Issue-level all-or-nothing**；任一 proposed action 不满足冻结 policy，整个 Issue 进入 DEFER，不进行 per-action 部分自动执行；
+- 冻结评测报告在评测时点把缺少 per-action authorization 记录为 enforce limitation；当前生产代码仍选择 Issue-level all-or-nothing，因此 enforce 的适用范围必须按这一边界解释，不能宣称为“任意多动作 Issue 都可部分自动执行”；
+- Retrieval Evaluation 衡量候选召回与排序，不等于 duplicate classification Precision / F1，因此 duplicate 自动执行未开启；
+- 未启用 cross-encoder reranker；Issue Embedding 在本地 CPU 运行，不向外部 Embedding 服务发送 Issue 内容；
 - 观测体系基于 PostgreSQL 持久化，未接入 OpenTelemetry / Prometheus / Grafana；
-- 未配置确认的模型单价时，成本指标保持 `null`；
-- 当前是工作流型 Agent（LangGraph workflow），不是多智能体，也没有 MCP / Kubernetes / Kafka 等设施；
-- 可对外引用的 Agent 指标需要独立人工标注集与 `--allow-external` 实测，README 不虚构生产流量、QPS、uptime 或 SLA；
-- **自动化 calibration 尚未完成**：默认 `shadow` 模式，`policy.json` 全部 intent 均 disabled；当前没有 `automation coverage` / `auto-action precision` 可发布数字，不虚构任何覆盖率；
-- **duplicate 自动执行未开启**：当前 Retriever 离线覆盖率（DEV Top-100 最佳 HitRate 约 82.43%）尚不足以支撑自动重复处理，duplicate 只进入 DEFER + enriched handoff；
-- **enforce 模式**只有在配置了经过人工复核的冻结 policy 后才安全，缺少冻结策略时严格 fail-closed。
+- 当前是 LangGraph workflow 型 Agent，不是多智能体系统，也没有 MCP / Kubernetes / Kafka 等当前规模不需要的设施；
+- 默认 rollout 仍为 `shadow`，Worker 的 GitHub 写开关默认关闭；当前真实 enforce 只用于受控 E2E 验证，不宣称已经全面开放无人写入；
+- README 的自动化数字来自冻结离线协议，不虚构生产流量、QPS、uptime、SLA 或完整 Agent accuracy。
 
 ## Roadmap
 
-- 一键 Smoke Test 与更完整的 Webhook / 审核回归用例，让新环境可复现验证；
-- 长文本与检索的进一步分析：在更长 Issue 上的 Chunk 配置、以及 Hybrid 排序质量为何低于纯 Vector 的归因；
-- 补全崩溃窗口下的外部状态对账与人工对账工具；
-- 明确模型单价配置，使成本指标从 `null` 变为可解释的估算；
-- 评估更细粒度的 Agent 指标（结构化输出成功率、延迟分布）并沉淀为可对外引用的报告。
+- 为 `request_missing_information`、`post_technical_reply` 等新 intent 建立独立 Ground Truth / DEV / unseen TEST calibration，在达到预设可靠性门槛前保持 disabled；
+- 扩大自动化覆盖时继续遵守 Issue-level all-or-nothing：只有同一 Issue 的全部 proposed actions 都被冻结策略授权时才 AUTO_EXECUTE；是否未来引入更细粒度执行模型需另行设计与评测，不作为当前默认架构假设；
+- 继续提升 duplicate retrieval 的召回与顶部排序，并在获得独立 duplicate-decision benchmark 前坚持人工接管；
+- 补全 GitHub 外部 side effect 崩溃窗口下的状态对账与人工恢复工具；
+- 增加更易复现的一键 Smoke Test，覆盖 Webhook → Agent → Policy → Outbox → Worker 的关键链路；
+- 对长文本 Chunk、Hybrid fusion 与潜在 reranker 使用预注册评测，避免根据 TEST 结果反向调参；
+- 完善成本与运行观测，但不为当前规模引入没有实际收益的复杂基础设施。
 
 ## 文档与评估产物
 
@@ -576,6 +686,8 @@ curl --noproxy '*' \
 - [长文本 Issue 检索策略](docs/rag-long-document-strategy.md)
 - [任务投递与恢复](docs/reliability.md)
 - [选择性自动化 V2](docs/selective-automation-v2.md)
+- [自动标签最终评测报告](eval/automation/FINAL-LABEL-AUTOMATION-REPORT.md)
+- 冻结自动标签策略：`eval/automation/policy.label.frozen.json`
 - [检索评测报告与数据集说明](eval/README.md)
 - 评估产物：`eval/reports/rag_baseline_dev.json`、`eval/reports/rag_dev.json`、`eval/reports/rag_frozen_config.json`、`eval/reports/rag_primary_method.json`、`eval/reports/rag_test.json`
 - 数据集：`eval/datasets/duplicate_qrels_dev.jsonl`、`eval/datasets/duplicate_qrels_test.jsonl`、`eval/datasets/duplicate_clusters.json`、`eval/datasets/repository_snapshots.json`
