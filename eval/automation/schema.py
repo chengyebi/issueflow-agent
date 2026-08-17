@@ -43,9 +43,13 @@ class GroundTruthItem(BaseModel):
     title: str
     body: str = ""
     category: str  # bug | feature | question | documentation
+    # 该 repo 中 category 对应的具体 GitHub label（来自真实维护者标签体系）。
+    expected_label: str = ""
     source_labels: list[str] = Field(default_factory=list)
     state: str = "open"
     github_created_at: str = ""
+    # near-duplicate group id（P1.2）；同一 group 不跨 DEV/TEST。
+    group_id: int | None = None
 
 
 class ExcludedItem(BaseModel):

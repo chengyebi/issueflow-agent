@@ -158,6 +158,12 @@ def freeze_candidate(
         "runner_type": runner_type,
         "sample_count": auto_total,
         "enforce_ready": enforce_allowed,
+        "metrics": {
+            "by_category": report.get("by_category", {}),
+            "by_repo": report.get("by_repo", {}),
+            "by_repo_category": report.get("by_repo_category", {}),
+            "by_confidence_bucket": report.get("by_confidence_bucket", {}),
+        },
         "rules": rules,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,12 +178,12 @@ def main() -> None:
     parser.add_argument(
         "--predictions",
         type=Path,
-        default=Path("eval/automation/predictions/predictions_dev.jsonl"),
+        default=Path("eval/automation/predictions/predictions_dev_v2.jsonl"),
     )
     parser.add_argument(
         "--dataset-manifest",
         type=Path,
-        default=Path("eval/automation/label_ground_truth_dev.manifest.json"),
+        default=Path("eval/automation/datasets/label_ground_truth_dev_v2.manifest.json"),
     )
     parser.add_argument(
         "--out", type=Path, default=Path("eval/automation/policy.frozen.json")

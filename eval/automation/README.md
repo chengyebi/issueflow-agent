@@ -57,29 +57,30 @@ Stage 2: predictions.jsonl
 ## 用法
 
 ```bash
-# 1. 从数据库构建 DEV 数据集（时间切分，排除近重复跨 split）
-python build_label_ground_truth.py --split dev --state both --out-dir eval/automation
+# 1. 从数据库构建 DEV v2 数据集（repo+category 分层时间切分，Jaccard near-dup 防泄漏）
+python build_label_ground_truth.py --split dev --repos 'microsoft/vscode,nodejs/node,rust-lang/rust' \
+  --out-dir eval/automation/datasets
 
 # 2. Stage 1：生成预测 artifact（启发式 smoke；不读取 ground truth）
 python generate_predictions.py \
-  --dataset eval/automation/label_ground_truth_dev.jsonl \
-  --out eval/automation/predictions/predictions_dev.jsonl
+  --dataset eval/automation/datasets/label_ground_truth_dev_v2.jsonl \
+  --out eval/automation/predictions/predictions_dev_v2.jsonl
 
 # 3. Stage 2：在冻结 prediction 上运行评测（全 disabled policy 时 coverage=0）
 python run_automation_eval.py \
-  --predictions eval/automation/predictions/predictions_dev.jsonl \
+  --predictions eval/automation/predictions/predictions_dev_v2.jsonl \
   --policy eval/automation/policy.json \
   --out eval/reports/automation_eval.json
 
 # 4. Stage 2：扫描阈值并生成冻结候选（只读 DEV，heuristic_smoke 时 enforce_ready=False）
 python select_policy_thresholds.py \
-  --predictions eval/automation/predictions/predictions_dev.jsonl \
-  --dataset-manifest eval/automation/label_ground_truth_dev.manifest.json \
+  --predictions eval/automation/predictions/predictions_dev_v2.jsonl \
+  --dataset-manifest eval/automation/datasets/label_ground_truth_dev_v2.manifest.json \
   --out eval/automation/policy.frozen.json
 
 # 5. 仅当冻结完成、人工复核后可解锁 TEST（一次性观察）
 python run_automation_eval.py \
-  --predictions eval/automation/predictions/predictions_test.jsonl \
+  --predictions eval/automation/predictions/predictions_test_v2.jsonl \
   --policy eval/automation/policy.frozen.json \
   --out eval/reports/automation_eval_test.json
 ```
@@ -105,13 +106,17 @@ enforce 模式加载策略时，`load_calibrated_policy(for_enforce=True)` 严�
 
 ## 当前状态（诚实声明）
 
-- **工具链已完成**：两阶段架构、时间切分、近重复防泄漏、阈值曲线、enforce 校验均已实现。
-- **真实数据已接入**（P1）：从用户 `issueflow` 数据卷只读构建了
-  DEV 2013 条 + unseen TEST 504 条（见 `P1-DATA-REPORT.md`），
-  时间切分（DEV=较早 80%），排除近重复跨 split；TEST 冻结前未查看。
-- **heuristic_smoke prediction 已生成**（DEV 2013 条，免费），展示工具链工作正常，
-  其 coverage/precision **不代表 production 能力**（confidence 固定 1.0，无阈值区分度）。
+- **工具链已完成**：两阶段架构、repo+category 分层时间切分、Jaccard near-dup 防泄漏、
+  仓库级 label resolver、阈值曲线、enforce 校验均已实现。
+- **真实数据已接入**（P1.6）：从用户 `issueflow` 数据卷只读构建了 v2
+  DEV 2011 条 + unseen TEST 506 条（见 `P1-DATA-REPORT.md`），
+  四类都进入 DEV 与 TEST；near-dup 2415 groups 全部不跨 split；TEST 冻结前未查看。
+- **v1 数据集已废弃**（旧 TEST 只有 bug+feature），移至 `datasets/deprecated/`。
 - **production-compatible LLM prediction 未执行**：成本估算约 $0.42（DEV 全量），
   需用户确认模型后运行；正式 threshold selection 只读取 production prediction artifact。
+- **仓库级 label resolver（P1.3）已实现**：Agent 只输出 category，具体 label 由
+  `repo_labels.REPO_CATEGORY_LABELS` 决定；无验证映射的 (repo, category) 必须 DEFER。
+- **REQUEST_MISSING_INFORMATION 已隔离（P1.5）**：独立 confidence、强制 disabled，
+  不共享 category calibration。
 - `policy.json` 仍是初始全 disabled 的冻结 artifact；正式 freeze 需 production prediction + 人工复核。
 - 当前生产默认 `AUTOMATION_MODE=shadow`，即使有冻结 policy 也不会自动写回。

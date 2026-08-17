@@ -25,6 +25,7 @@ sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(EVAL))
 
 from run_automation_eval import run_eval  # noqa: E402
+from build_label_ground_truth import _group_near_duplicates, _title_jaccard  # noqa: E402
 
 
 def _temporary_policy(threshold: float = 0.0, *, allow_auto: bool = True) -> Path:
@@ -73,7 +74,8 @@ class TestGroundTruthLeakage:
                 "issue_number": 1,
                 "true_category": "bug",
                 "predicted_category": "feature",
-                "predicted_label": "enhancement",
+                "expected_label": "bug",
+                "resolved_label": "feature-request",
                 "raw_confidence": 1.0,
                 "action_intent": "add_category_label",
                 "model_name": "test",
@@ -96,7 +98,8 @@ class TestGroundTruthLeakage:
                 "issue_number": 2,
                 "true_category": "bug",
                 "predicted_category": "bug",
-                "predicted_label": "bug",
+                "expected_label": "bug",
+                "resolved_label": "bug",
                 "raw_confidence": 1.0,
                 "action_intent": "add_category_label",
                 "model_name": "test",
@@ -112,11 +115,38 @@ class TestGroundTruthLeakage:
         assert report["error_auto_execute_count"] == 0
         assert report["auto_action_precision"] == 1.0
 
+    def test_resolver_wrong_label_counts_as_error(self):
+        """P1.4：模型 category 对但 resolver label 错 -> 必须计错。"""
+        predictions = [
+            {
+                "repo": "microsoft/vscode",
+                "issue_number": 3,
+                "true_category": "feature",
+                "predicted_category": "feature",
+                # 模型 category 正确，但 resolver 给出错误 label（本应 feature-request）。
+                "expected_label": "feature-request",
+                "resolved_label": "bug",
+                "raw_confidence": 1.0,
+                "action_intent": "add_category_label",
+                "model_name": "test",
+                "prompt_version": "t",
+                "input_hash": "h",
+                "runner_type": "heuristic_smoke",
+            }
+        ]
+        pred_path = _write_predictions(predictions)
+        policy_path = _temporary_policy(threshold=0.0, allow_auto=True)
+        report = run_eval(pred_path, policy_path)
+        assert report["auto_execute_count"] == 1
+        assert report["error_auto_execute_count"] == 1
+        assert report["auto_action_precision"] == 0.0
+
     def test_generate_predictions_never_reads_true_category(self):
         """验证 generate_predictions.py 不会把 case['category'] 用作预测输入。"""
         source = (EVAL / "generate_predictions.py").read_text(encoding="utf-8")
         # true_category 只出现在写入 artifact 的行，不得出现在 _heuristic_category 内。
-        assert "true_category" not in source.split("def _heuristic_category")[1].split("def _map_to_label")[0]
+        heuristic_section = source.split("def _heuristic_category")[1].split("def _input_hash")[0]
+        assert "true_category" not in heuristic_section
         # 预测函数只接受 title/body。
         assert "def _heuristic_category(title: str, body: str)" in source
 
@@ -172,6 +202,44 @@ class _FakeResult:
         self.proposed_actions = actions
         self.repo = "owner/repo"
         self.issue_number = 1
+
+
+class TestNearDuplicateGrouping:
+    """P1.2：token Jaccard near-duplicate grouping 的正确性。"""
+
+    def _item(self, title):
+        from schema import GroundTruthItem
+
+        return GroundTruthItem(
+            repo="microsoft/vscode",
+            issue_number=1,
+            title=title,
+            category="bug",
+            expected_label="bug",
+            github_created_at="2026-01-01T00:00:00Z",
+        )
+
+    def test_wording_variants_group_together(self):
+        """仅措辞变化的标题必须分到同组。"""
+        items = [
+            self._item("Cannot connect to remote server"),
+            self._item("Cannot connect to the remote server"),
+        ]
+        groups = _group_near_duplicates(items)
+        assert len(groups) == 1, "措辞变体应归入同一 group"
+
+    def test_unrelated_titles_do_not_group(self):
+        items = [
+            self._item("Cannot connect to remote server"),
+            self._item("Dark theme colors are wrong in menus"),
+        ]
+        groups = _group_near_duplicates(items)
+        assert len(groups) == 2
+
+    def test_jaccard_is_symmetric(self):
+        a = "login button does not work"
+        b = "login button does not work anymore"
+        assert abs(_title_jaccard(a, b) - _title_jaccard(b, a)) < 1e-9
 
 
 class TestDamagedPolicyFailClosed:

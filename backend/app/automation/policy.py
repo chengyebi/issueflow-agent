@@ -135,6 +135,29 @@ def decide_automation(
     #    AUTO_EXECUTE 必须同时满足：rule 存在、enabled=True、allow_auto=True
     #    （即 is_auto_enabled）、confidence 阈值、evidence 要求。
     for action in actions:
+        # P1.5：REQUEST_MISSING_INFORMATION 必须拥有独立校准才能自动执行；
+        # 不能因为 add_category_label 通过 calibration 就放行缺失信息回复。
+        # 该 intent 没有独立校准数据时永远 DEFER。
+        if action.intent == ActionIntent.REQUEST_MISSING_INFORMATION:
+            rule = (
+                calibrated_policy.rule_for(action.intent)
+                if calibrated_policy is not None
+                else None
+            )
+            independently_calibrated = (
+                rule is not None
+                and rule.enabled
+                and rule.allow_auto
+                and rule.observed_precision is not None
+                and rule.sample_count > 0
+            )
+            if not independently_calibrated:
+                return AutomationDecision(
+                    disposition=AutomationDisposition.DEFER,
+                    policy_version=_policy_version(calibrated_policy),
+                    handoff=_policy_blocked_handoff(result, action),
+                    shadow=shadow,
+                )
         rule = (
             calibrated_policy.rule_for(action.intent)
             if calibrated_policy is not None

@@ -277,6 +277,62 @@ class TestAutoExecute:
         assert decision.actions[0].intent == ActionIntent.ADD_CATEGORY_LABEL
 
 
+class TestMissingInformationIsolation:
+    """P1.5：REQUEST_MISSING_INFORMATION 不能共享 category calibration。"""
+
+    def _comment_action(self, confidence=0.99):
+        return AutomationAction(
+            type="post_comment",
+            value="请补充日志",
+            intent=ActionIntent.REQUEST_MISSING_INFORMATION,
+            confidence=confidence,
+            rationale="缺少复现信息",
+            evidence=["缺失字段：错误日志"],
+        )
+
+    def test_request_missing_info_defers_even_when_category_calibrated(self):
+        """即使 add_category_label 通过冻结 calibration，missing-info 仍 DEFER。"""
+        # 构造 add_label 已校准、request_missing_info 未独立校准的 policy。
+        policy = _policy(
+            request_missing_information={
+                "enabled": True,
+                "min_model_confidence": 0.0,
+                "require_evidence": True,
+                "allow_auto": False,  # 未独立校准
+            }
+        )
+        decision = decide_automation(
+            _Result(proposed_actions=[self._comment_action()]),
+            mode="enforce",
+            calibrated_policy=policy,
+        )
+        assert decision.disposition == AutomationDisposition.DEFER
+        assert decision.handoff.reason_code == DeferReasonCode.POLICY_BLOCKED
+
+    def test_request_missing_info_never_shares_category_confidence(self):
+        """缺失信息动作的 confidence 来自独立字段，不是 category_confidence。"""
+        from app.agents import workflow
+
+        state = {
+            "repo": "nodejs/node",
+            "issue_number": 1,
+            "category": "bug",
+            "confidence": 0.99,  # category 高置信
+            "missing_info_confidence": 0.0,  # 独立字段，未校准
+            "missing_repro_fields": ["environment", "version"],
+            "duplicate_assessment": {"is_duplicate": False},
+        }
+        result = workflow.prepare_actions(state)
+        actions = result["proposed_actions"]
+        missing_action = [
+            a for a in actions
+            if a["intent"] == "request_missing_information"
+        ]
+        assert missing_action, "应有缺失信息动作"
+        # P1.5：missing-info confidence 必须是独立值（0.0），不是 category 的 0.99。
+        assert missing_action[0]["confidence"] == 0.0
+
+
 class TestNoAction:
     def test_no_external_action(self):
         decision = decide_automation(

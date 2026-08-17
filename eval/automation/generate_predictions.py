@@ -20,8 +20,7 @@ import json
 from pathlib import Path
 
 from app.automation.models import ActionIntent
-
-from schema import CORE_LABEL_REVERSE
+from app.automation.repo_labels import resolve_category_label
 
 SCHEMA_VERSION = "1.0"
 
@@ -55,11 +54,6 @@ def _input_hash(title: str, body: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _map_to_label(category: str) -> str | None:
-    """预测分类到 GitHub label（category -> label 方向）。"""
-    return CORE_LABEL_REVERSE.get(category)
-
-
 def generate_predictions(dataset_path: Path, out_path: Path) -> dict:
     cases = []
     with dataset_path.open("r", encoding="utf-8") as f:
@@ -75,9 +69,10 @@ def generate_predictions(dataset_path: Path, out_path: Path) -> dict:
         body = case.get("body", "")
         # P0-1：预测绝不读取 case["category"]。
         predicted_category = _heuristic_category(title, body)
-        label = _map_to_label(predicted_category)
+        # P1.3：Agent 只输出 category；具体 GitHub label 由仓库级 resolver 决定。
+        resolved_label = resolve_category_label(case["repo"], predicted_category)
         action_intent = (
-            ActionIntent.ADD_CATEGORY_LABEL.value if label else None
+            ActionIntent.ADD_CATEGORY_LABEL.value if resolved_label else None
         )
         predictions.append(
             {
@@ -85,7 +80,9 @@ def generate_predictions(dataset_path: Path, out_path: Path) -> dict:
                 "issue_number": case["issue_number"],
                 "true_category": case["category"],
                 "predicted_category": predicted_category,
-                "predicted_label": label,
+                # P1.4：评估最终动作正确性需要 expected_label（ground truth）与 resolved_label（预测）。
+                "expected_label": case.get("expected_label"),
+                "resolved_label": resolved_label,
                 "raw_confidence": 1.0,  # heuristic_smoke：固定，非校准值
                 "action_intent": action_intent,
                 "model_name": HEURISTIC_MODEL_NAME,
@@ -116,7 +113,7 @@ def generate_predictions(dataset_path: Path, out_path: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="生成预测 artifact（Stage 1）")
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--out", type=Path, default=Path("eval/automation/predictions/predictions_dev.jsonl"))
+    parser.add_argument("--out", type=Path, default=Path("eval/automation/predictions/predictions_dev_v2.jsonl"))
     args = parser.parse_args()
 
     result = generate_predictions(args.dataset, args.out)

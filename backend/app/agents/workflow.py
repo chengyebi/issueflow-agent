@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.automation.handoff import render_missing_information_comment
 from app.automation.models import ActionIntent, AutomationAction
+from app.automation.repo_labels import resolve_category_label
 from app.core.config import get_settings
 from app.core.tracing import TraceSession, current_trace, trace_node, use_trace
 from app.rag.retrieval import HybridRetriever
@@ -17,12 +18,8 @@ Priority = Literal["low", "medium", "high", "critical"]
 RiskLevel = Literal["low", "medium", "high"]
 ReviewStatus = Literal["WAITING_REVIEW", "NEEDS_SECURITY_REVIEW"]
 
-CATEGORY_TO_GITHUB_LABEL = {
-    "bug": "bug",
-    "feature": "enhancement",
-    "question": "question",
-    "documentation": "documentation",
-}
+# 仓库级 category -> GitHub label 映射由 repo_labels.RepoLabelResolver 决定，
+# 不再使用全局假设的 label 名（P1.3）。
 
 
 class IssueAgentRequest(BaseModel):
@@ -46,6 +43,8 @@ class ReviewDraft(BaseModel):
     missing_repro_fields: list[str] = Field(description="当前 Issue 缺少的复现信息")
     summary: str = Field(description="给维护者看的简洁摘要")
     suggested_reply: str = Field(description="建议回复给 Issue 提交者的内容")
+    # 信息完整性判断的独立置信度，与 triage category 置信度分离（P1.5）。
+    missing_info_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class DuplicateJudgment(BaseModel):
@@ -75,6 +74,7 @@ class IssueAgentResponse(BaseModel):
     priority: Priority
     risk_level: RiskLevel
     confidence: float
+    missing_info_confidence: float = 0.0
     missing_repro_fields: list[str]
     summary: str
     suggested_reply: str
@@ -328,24 +328,33 @@ def prepare_actions(state: IssueAgentState) -> dict:
         return {"status": "WAITING_REVIEW", "proposed_actions": []}
 
     actions: list[AutomationAction] = []
-    confidence = float(state.get("confidence", 0.0))
+    category_confidence = float(state.get("confidence", 0.0))
+    repo = state.get("repo", "")
 
-    label = CATEGORY_TO_GITHUB_LABEL.get(state.get("category", "other"))
+    # P1.3：Agent 只输出 category，具体 label 名由仓库级 resolver 决定。
+    # 无验证映射时不给 add_label action，Policy Gate 将 DEFER（UNSUPPORTED_ACTION）。
+    category = state.get("category", "other")
+    label = resolve_category_label(repo, category) if repo else None
     if label is not None:
         actions.append(
             AutomationAction(
                 type="add_label",
                 value=label,
                 intent=ActionIntent.ADD_CATEGORY_LABEL,
-                confidence=confidence,
+                confidence=category_confidence,
                 rationale=(
-                    f"Issue 被分诊为 {state.get('category')}，对应 GitHub label。"
+                    f"Issue 被分诊为 {category}，经仓库级映射解析为 label。"
                 ),
-                evidence=[f"分类：{state.get('category')}"],
+                evidence=[f"分类：{category}"],
             )
         )
 
-    # 只有 agent 明确判断需要回复时，才生成模板化评论。
+    # P1.5：缺失信息回复的 confidence 与 category 分诊 confidence 分离。
+    # missing_repro_fields 来自 draft_review（信息完整性判断），
+    # 不是 triage category 判断，因此绝不复用 category_confidence。
+    # REQUEST_MISSING_INFORMATION 在冻结策略中强制 disabled，
+    # 独立 confidence 仅为可观测记录，不能开启其自动执行。
+    missing_info_confidence = float(state.get("missing_info_confidence", 0.0))
     missing_fields = list(state.get("missing_repro_fields") or [])
     if missing_fields:
         try:
@@ -358,7 +367,7 @@ def prepare_actions(state: IssueAgentState) -> dict:
                     type="post_comment",
                     value=comment,
                     intent=ActionIntent.REQUEST_MISSING_INFORMATION,
-                    confidence=confidence,
+                    confidence=missing_info_confidence,
                     rationale="Issue 缺少复现信息，按确定性模板请求补充。",
                     evidence=[f"缺失字段：{'、'.join(missing_fields)}"],
                 )

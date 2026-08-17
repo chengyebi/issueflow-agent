@@ -33,6 +33,7 @@ from app.automation.models import (
 )
 from app.automation.policy import decide_automation
 from app.automation.policy_loader import CalibratedPolicy, load_calibrated_policy
+from app.automation.repo_labels import resolve_category_label
 
 # 允许自动化的 intent 集合（需与冻结 policy 一致）。
 ALLOWED_AUTO_INTENTS = {ActionIntent.ADD_CATEGORY_LABEL}
@@ -55,15 +56,21 @@ class _EvalResult:
         self.proposed_actions = actions
 
 
-def _build_action(predicted_category: str, confidence: float) -> AutomationAction | None:
-    if predicted_category not in ("bug", "feature", "question", "documentation"):
+def _build_action(repo: str, predicted_category: str, confidence: float) -> AutomationAction | None:
+    """P1.3/P1.4：动作 value 是仓库级 resolver 解析出的具体 GitHub label。
+
+    Agent 只输出 category；resolver 决定最终要写回 GitHub 的 label。
+    无映射返回 None（Policy Gate 将 DEFER）。
+    """
+    label = resolve_category_label(repo, predicted_category)
+    if label is None:
         return None
     return AutomationAction(
         type="add_label",
-        value=predicted_category,
+        value=label,
         intent=ActionIntent.ADD_CATEGORY_LABEL,
         confidence=confidence,
-        rationale=f"预测分诊为 {predicted_category}",
+        rationale=f"预测分诊为 {predicted_category}，resolver 解析为 label {label}",
         evidence=[f"分类：{predicted_category}"],
     )
 
@@ -116,7 +123,9 @@ def run_eval(predictions_path: Path, policy_path: Path) -> dict:
     auto_total = 0
 
     by_intent: dict[str, dict] = {}
+    by_category: dict[str, dict] = {}
     by_repo: dict[str, dict] = {}
+    by_repo_category: dict[str, dict] = {}
     by_bucket: dict[str, dict] = {}
     defer_reasons: dict[str, int] = {}
     sample_auto: list[dict] = []
@@ -124,10 +133,12 @@ def run_eval(predictions_path: Path, policy_path: Path) -> dict:
     for case in predictions:
         true_category = case["true_category"]
         predicted_category = case["predicted_category"]
+        expected_label = case.get("expected_label")
+        resolved_label = case.get("resolved_label")
         prediction_confidence = case.get("raw_confidence", 1.0)
 
-        # 预测动作只基于 predicted_category。
-        action = _build_action(predicted_category, prediction_confidence)
+        # 预测动作基于 predicted_category，value 由仓库级 resolver 决定（P1.3）。
+        action = _build_action(case["repo"], predicted_category, prediction_confidence)
         result = _EvalResult(
             case["repo"], case["issue_number"], predicted_category, [action] if action else []
         )
@@ -139,8 +150,9 @@ def run_eval(predictions_path: Path, policy_path: Path) -> dict:
         if disposition == AutomationDisposition.AUTO_EXECUTE:
             auto_count += 1
             auto_total += 1
-            # P0-1：唯一比较点，predicted vs true。
-            if predicted_category == true_category:
+            # P1.4：最终动作正确 = 准备执行到 GitHub 的 label 与 expected_label 一致。
+            # 模型 category 对但 resolver label 错 => 算错误。
+            if resolved_label is not None and resolved_label == expected_label:
                 auto_correct += 1
             else:
                 error_auto_count += 1
@@ -150,11 +162,13 @@ def run_eval(predictions_path: Path, policy_path: Path) -> dict:
                     "issue_number": case["issue_number"],
                     "true_category": true_category,
                     "predicted_category": predicted_category,
+                    "expected_label": expected_label,
+                    "resolved_label": resolved_label,
                     "confidence": prediction_confidence,
                 }
             )
             bucket = _confidence_bucket(prediction_confidence)
-            _bump(by_bucket, bucket, true_category, predicted_category)
+            _bump(by_bucket, bucket, expected_label, resolved_label)
         elif disposition == AutomationDisposition.DEFER:
             defer_count += 1
             reason_code = (
@@ -168,8 +182,15 @@ def run_eval(predictions_path: Path, policy_path: Path) -> dict:
 
         if decision.actions:
             intent = decision.actions[0].intent.value
-            _bump(by_intent, intent, true_category, predicted_category)
-            _bump(by_repo, case["repo"], true_category, predicted_category)
+            _bump(by_intent, intent, expected_label, resolved_label)
+            _bump(by_category, case.get("true_category", "?"), expected_label, resolved_label)
+            _bump(by_repo, case["repo"], expected_label, resolved_label)
+            _bump(
+                by_repo_category,
+                f"{case['repo']}/{case.get('true_category', '?')}",
+                expected_label,
+                resolved_label,
+            )
 
     eligible = len(predictions)
     coverage = auto_count / eligible if eligible else 0.0
@@ -191,7 +212,9 @@ def run_eval(predictions_path: Path, policy_path: Path) -> dict:
         "prediction_artifact_hash": artifact_hash,
         "runner_type": predictions[0].get("runner_type") if predictions else None,
         "by_intent": _finalize_metrics(by_intent),
+        "by_category": _finalize_metrics(by_category),
         "by_repo": _finalize_metrics(by_repo),
+        "by_repo_category": _finalize_metrics(by_repo_category),
         "by_confidence_bucket": _finalize_metrics(by_bucket),
         "defer_reason_distribution": defer_reasons,
         "samples": sample_auto[:20],
@@ -223,7 +246,7 @@ def main() -> None:
     parser.add_argument(
         "--predictions",
         type=Path,
-        default=Path("eval/automation/predictions/predictions_dev.jsonl"),
+        default=Path("eval/automation/predictions/predictions_dev_v2.jsonl"),
     )
     parser.add_argument(
         "--policy", type=Path, default=Path("eval/automation/policy.json")
