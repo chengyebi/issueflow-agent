@@ -32,15 +32,30 @@
     },
     "request_missing_information": {
       "enabled": false,
-      "allow_auto": false
+      "allow_auto": false,
+      "min_model_confidence": 1.0,
+      "require_evidence": true,
+      "observed_precision": null,
+      "coverage": null,
+      "sample_count": 0
     },
     "post_technical_reply": {
       "enabled": false,
-      "allow_auto": false
+      "allow_auto": false,
+      "min_model_confidence": 1.0,
+      "require_evidence": true,
+      "observed_precision": null,
+      "coverage": null,
+      "sample_count": 0
     },
     "duplicate_action": {
       "enabled": false,
-      "allow_auto": false
+      "allow_auto": false,
+      "min_model_confidence": 1.0,
+      "require_evidence": true,
+      "observed_precision": null,
+      "coverage": null,
+      "sample_count": 0
     }
   }
 }
