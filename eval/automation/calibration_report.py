@@ -43,11 +43,12 @@ def _load_predictions(path: Path) -> list[dict]:
 
 
 class _EvalResult:
-    def __init__(self, repo, issue_number, predicted_category, actions):
+    def __init__(self, repo, issue_number, predicted_category, actions, risk_level="low"):
         self.repo = repo
         self.issue_number = issue_number
         self.category = predicted_category
-        self.risk_level = "low"
+        # 2.3：使用真实 predicted_risk_level，不能硬编码 low。
+        self.risk_level = risk_level
         self.retrieval_degraded = False
         self.duplicate_assessment = None
         self.proposed_actions = actions
@@ -102,6 +103,8 @@ def _score(predictions: list[dict], threshold: float) -> dict:
     auto_correct = 0
     auto_total = 0
     error_auto = 0
+    high_risk_defer = 0
+    unsupported_defer = 0
     by_repo: dict[str, list] = {}
     by_category: dict[str, list] = {}
     by_repo_category: dict[str, list] = {}
@@ -113,13 +116,26 @@ def _score(predictions: list[dict], threshold: float) -> dict:
         resolved_label = case["resolved_label"]
         raw_confidence = case.get("raw_confidence")
         structured_success = case.get("structured_output_success", True)
+        predicted_risk_level = case.get("predicted_risk_level", "low")
 
-        action = _build_action(case["repo"], predicted_category, raw_confidence)
+        # 2.3：structured output failure 永远不能 auto。
+        action = (
+            _build_action(case["repo"], predicted_category, raw_confidence)
+            if structured_success
+            else None
+        )
         result = _EvalResult(
-            case["repo"], case["issue_number"], predicted_category, [action] if action else []
+            case["repo"], case["issue_number"], predicted_category,
+            [action] if action else [],
+            risk_level=predicted_risk_level,
         )
         decision = decide_automation(result, mode="enforce", calibrated_policy=policy)
         if decision.disposition != AutomationDisposition.AUTO_EXECUTE:
+            # 统计为什么 DEFER：high-risk / unsupported。
+            if predicted_risk_level == "high":
+                high_risk_defer += 1
+            elif decision.handoff is not None and decision.handoff.reason_code.value == "unsupported_action":
+                unsupported_defer += 1
             continue
         auto_total += 1
         correct = (
@@ -146,6 +162,8 @@ def _score(predictions: list[dict], threshold: float) -> dict:
         "ci_lower": round(lower, 4),
         "ci_upper": round(upper, 4),
         "error_count": error_auto,
+        "high_risk_defer_count": high_risk_defer,
+        "unsupported_defer_count": unsupported_defer,
         "by_repo": _finalize(by_repo),
         "by_category": _finalize(by_category),
         "by_repo_category": _finalize(by_repo_category),
@@ -170,45 +188,68 @@ def _finalize(buckets: dict[str, list]) -> dict:
     return out
 
 
+def _conf_summary(values: list[float]) -> dict:
+    if not values:
+        return {"count": 0}
+    s = sorted(values)
+    n = len(s)
+
+    def pct(p):
+        return round(s[min(n - 1, int(p * n))], 4)
+
+    return {
+        "count": n,
+        "mean": round(sum(s) / n, 4),
+        "median": pct(0.50),
+        "p10": pct(0.10),
+        "p25": pct(0.25),
+        "p75": pct(0.75),
+        "p90": pct(0.90),
+    }
+
+
 def confidence_analysis(predictions: list[dict]) -> dict:
-    """P2.4：raw confidence 是否有选择能力。"""
+    """P2.4：raw confidence 是否有选择能力（correct vs incorrect 分布）。"""
     correct_confs = []
     incorrect_confs = []
     for case in predictions:
         conf = case.get("raw_confidence")
-        if conf is None:
+        if conf is None or case.get("predicted_category") is None:
             continue
         correct = (
             case.get("predicted_category") == case.get("true_category")
             and case.get("resolved_label") == case.get("expected_label")
         )
-        if case.get("predicted_category") is None:
-            continue
         (correct_confs if correct else incorrect_confs).append(conf)
     return {
-        "correct_conf_mean": round(sum(correct_confs) / len(correct_confs), 4) if correct_confs else None,
-        "correct_conf_count": len(correct_confs),
-        "incorrect_conf_mean": round(sum(incorrect_confs) / len(incorrect_confs), 4) if incorrect_confs else None,
-        "incorrect_conf_count": len(incorrect_confs),
+        "correct": _conf_summary(correct_confs),
+        "incorrect": _conf_summary(incorrect_confs),
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="P2 calibration report")
     parser.add_argument("--predictions", type=Path, required=True)
-    parser.add_argument("--thresholds", type=str, default="0.0,0.7,0.8,0.9,0.95,0.99")
+    parser.add_argument(
+        "--thresholds", type=str, default="all",
+        help="逗号分隔阈值，或 'all' 使用全部 unique confidence breakpoint + 边界",
+    )
     args = parser.parse_args()
 
     preds = _load_predictions(args.predictions)
+    if args.thresholds.strip().lower() == "all":
+        confs = sorted(
+            {r["raw_confidence"] for r in preds if r.get("raw_confidence") is not None}
+        )
+        thresholds = sorted(set([0.0] + confs + [1.0]))
+    else:
+        thresholds = [float(t) for t in args.thresholds.split(",")]
     failures = [p for p in preds if not p.get("structured_output_success", True)]
     print(json.dumps({
         "prediction_count": len(preds),
         "structured_output_failure_count": len(failures),
         "confidence_analysis": confidence_analysis(preds),
-        "threshold_curve": [
-            _score(preds, float(t))
-            for t in args.thresholds.split(",")
-        ],
+        "threshold_curve": [_score(preds, t) for t in thresholds],
     }, ensure_ascii=False, indent=2))
 
 

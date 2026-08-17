@@ -1,0 +1,22 @@
+{
+  "config_fingerprint": {
+    "runner_version": "prod-v2",
+    "model_name": "deepseek-v4-flash",
+    "llm_base_host": "api.deepseek.com",
+    "prompt_version": "triage-v2",
+    "triage_prompt_hash": "a8be89e71e42b4b33b9d7880f96b7cf28655a6e0736eb18fafa6c55578e9ae76",
+    "triage_schema_hash": "3e7f05d86184a560c78571a920c7147551ccda1bec95ff21432950af0a335838",
+    "repo_label_resolver_hash": "2423a335634e78bbade8ce9888caca6b85840480aa614307ad578666fa293af7",
+    "git_sha": "",
+    "pricing_effective_date": "2026-08-17"
+  },
+  "dataset_path": "/eval/automation/datasets/label_ground_truth_dev_v3.jsonl",
+  "dataset_hash": "326428b0a746b95edbc924f53cfe5e2f216ac3d3a6f6b9ca387d370dfafb4256",
+  "record_count": 2011,
+  "remaining_count": 0,
+  "total_input_tokens": 5198750,
+  "total_output_tokens": 172622,
+  "estimated_cost_cny": 5.543994,
+  "usage_source": "usage_metadata",
+  "updated_at": "2026-08-17T10:23:17Z"
+}
