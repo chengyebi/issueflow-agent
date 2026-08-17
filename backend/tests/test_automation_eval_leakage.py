@@ -11,7 +11,6 @@
 """
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -24,8 +23,8 @@ EVAL = BACKEND.parent / "eval" / "automation"
 sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(EVAL))
 
-from run_automation_eval import run_eval  # noqa: E402
 from build_label_ground_truth import _group_near_duplicates, _title_jaccard  # noqa: E402
+from run_automation_eval import run_eval  # noqa: E402
 
 
 def _temporary_policy(threshold: float = 0.0, *, allow_auto: bool = True) -> Path:
@@ -177,7 +176,7 @@ class TestAllowAutoSemantics:
 
         # enabled=true, allow_auto=false -> DEFER
         policy_path = _temporary_policy(allow_auto=False)
-        import json as _json
+
         from app.automation.policy_loader import load_calibrated_policy
 
         policy = load_calibrated_policy(policy_path)

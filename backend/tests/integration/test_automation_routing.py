@@ -12,7 +12,6 @@
 """
 
 import os
-from uuid import uuid4
 
 import pytest
 from psycopg.rows import dict_row

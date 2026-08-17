@@ -3,7 +3,6 @@
 import os
 
 import pytest
-from psycopg.rows import dict_row
 
 from app.db.connection import connect
 from app.services.automation_metrics import aggregate_automation_metrics

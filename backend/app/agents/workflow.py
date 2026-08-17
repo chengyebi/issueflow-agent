@@ -5,7 +5,8 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, model_validator
 
-from app.agents.triage import TriageResult, predict_triage
+from app.agents.triage import TriageResult as TriageResult
+from app.agents.triage import predict_triage
 from app.automation.handoff import render_missing_information_comment
 from app.automation.models import ActionIntent, AutomationAction
 from app.automation.repo_labels import resolve_category_label

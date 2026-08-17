@@ -2,7 +2,6 @@ import time
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
 from app.agent import IssueAgentRequest, run_issue_agent
 from app.core.config import get_settings

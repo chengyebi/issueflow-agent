@@ -209,7 +209,6 @@ def _save_automation_decision(cur, agent_run_id: int, decision: AutomationDecisi
 
 def _route(cur, agent_run_id: int, result: dict, decision: AutomationDecision, mode: str) -> RouteOutcome:
     disposition = decision.disposition
-    shadow = decision.shadow
 
     if mode == "off":
         # 紧急回退：完全兼容旧 review-all 行为，始终走人工审核。

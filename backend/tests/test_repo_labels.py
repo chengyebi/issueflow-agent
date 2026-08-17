@@ -1,9 +1,7 @@
 """仓库级 category -> GitHub label 解析测试（P1.3）。"""
 
-import pytest
 
 from app.automation.repo_labels import (
-    REPO_CATEGORY_LABELS,
     has_valid_mapping,
     resolve_category_label,
 )
