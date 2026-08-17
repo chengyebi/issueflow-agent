@@ -1,127 +1,106 @@
-# Automation Evaluation
+# Label Automation Evaluation
 
-选择性自动化（IssueFlow V2）的离线评测设施。
+本目录保存 IssueFlow 自动标签能力的正式评测协议、冻结策略与可复现实验产物。
 
-## 两阶段架构（P0-3 修复）
+## 评测目标
 
-评测严格分为两个阶段，**prediction 与 policy evaluation 完全分离**：
+评测范围限定为：
 
-```
-Stage 1: dataset
-         -> production-compatible predictor (generate_predictions.py)
-         -> predictions.jsonl    （冻结，只生成一次）
-
-Stage 2: predictions.jsonl
-         -> threshold scan / Policy Gate (run_automation_eval.py, select_policy_thresholds.py)
-         -> precision / coverage curve
-```
-
-- **Stage 1 绝不允许读取 ground truth 作为预测输入**（P0-1）：
-  每条记录区分 `true_category` / `predicted_category` / `prediction_confidence`；
-  `true_category` 只存在于 artifact 中，供 Stage 2 比较。
-- **Stage 2 不调用模型**：threshold scan 在完全相同的 prediction 上运行，
-  不会因为模型非确定性导致每个 threshold 使用不同 prediction。
-- **确定性启发式 runner（heuristic_smoke）**：`raw_confidence` 固定 1.0，
-  `runner_type=heuristic_smoke`，只能用于验证评测框架，
-  **不允许 freeze production policy**（`enforce_ready=False`）。
-- **production-compatible prediction**：必须运行与生产一致的分类逻辑，
-  保存 `predicted_category / raw_model_confidence / model_name / prompt_version /
-  input_hash`；正式 threshold selection 只能读取它的 frozen artifact。
-
-## 文件
-
-| 文件 | 用途 |
-|---|---|
-| `schema.py` | 数据集与评测报告 schema |
-| `build_label_ground_truth.py` | 从 historical_issues 的 maintainer labels 构建 category ground truth |
-| `generate_predictions.py` | **Stage 1**：dataset -> predictions.jsonl（启发式 smoke / 未来 production LLM） |
-| `run_automation_eval.py` | **Stage 2**：只读 predictions + policy，计算覆盖率/精度/defer 分布 |
-| `select_policy_thresholds.py` | **Stage 2**：同一份 prediction 上扫描阈值，输出 precision-coverage curve + Wilson CI |
-| `policy.json` | **初始冻结策略**：所有 intent 均 disabled（未校准，不伪造指标） |
-
-## 方法与约束
-
-- **Ground truth**：只用维护者明确的核心分类标签（bug / enhancement / question / documentation）。
-  同一 Issue 有多个互相冲突的核心标签时排除并记录 exclusion reason；
-  出现 duplicate/invalid/wontfix 等生命周期标签时排除。
-- **可复现**：数据集保存 SHA-256，repo-aware，按 seed 稳定打乱。
-- **防泄漏（P1）**：
-  - 支持时间切分：DEV = 较早时间段、TEST = 较新时间段；
-  - 标题近重复的 Issue 归入同一 group，不跨 split；
-  - TEST 在阈值冻结前不得查看。
-- **不烧付费 API**：默认 runner 是确定性启发式分类器，不调用外部 LLM。
-  若未来接入真实 LLM 评测，必须显式 `--runner production_llm` 并先获用户确认
-  成本（样本数 / 预计 calls / tokens / 美元成本）。
-- **绝不伪造指标**：没有真实 calibration 数据的 intent 一律 `enabled=false`。
-
-## 用法
-
-```bash
-# 1. 从数据库构建 DEV v2 数据集（repo+category 分层时间切分，Jaccard near-dup 防泄漏）
-python build_label_ground_truth.py --split dev --repos 'microsoft/vscode,nodejs/node,rust-lang/rust' \
-  --out-dir eval/automation/datasets
-
-# 2. Stage 1：生成预测 artifact（启发式 smoke；不读取 ground truth）
-python generate_predictions.py \
-  --dataset eval/automation/datasets/label_ground_truth_dev_v2.jsonl \
-  --out eval/automation/predictions/predictions_dev_v2.jsonl
-
-# 3. Stage 2：在冻结 prediction 上运行评测（全 disabled policy 时 coverage=0）
-python run_automation_eval.py \
-  --predictions eval/automation/predictions/predictions_dev_v2.jsonl \
-  --policy eval/automation/policy.json \
-  --out eval/reports/automation_eval.json
-
-# 4. Stage 2：扫描阈值并生成冻结候选（只读 DEV，heuristic_smoke 时 enforce_ready=False）
-python select_policy_thresholds.py \
-  --predictions eval/automation/predictions/predictions_dev_v2.jsonl \
-  --dataset-manifest eval/automation/datasets/label_ground_truth_dev_v2.manifest.json \
-  --out eval/automation/policy.frozen.json
-
-# 5. 仅当冻结完成、人工复核后可解锁 TEST（一次性观察）
-python run_automation_eval.py \
-  --predictions eval/automation/predictions/predictions_test_v2.jsonl \
-  --policy eval/automation/policy.frozen.json \
-  --out eval/reports/automation_eval_test.json
+```text
+Issue title/body
+→ production-compatible triage predictor
+→ repo-specific label resolver
+→ risk gate
+→ deterministic Policy Gate
+→ add_category_label
 ```
 
-## 核心指标
+该 benchmark **不测量完整端到端 Issue 自动化**。`duplicate_action`、
+`request_missing_information` 与 `post_technical_reply` 未在本轮取得独立自动执行校准，
+因此不由该 benchmark 授权。
 
-- `eligible_count` / `auto_execute_count` / `defer_count` / `no_action_count`
-- `automation_coverage` = auto_execute / eligible
-- `human_touch_rate` = defer / eligible
-- `auto_action_precision` + **Wilson 置信区间**（不只 point estimate）
-- `error_auto_execute_count`（错误自动执行数）
-- 按 intent / repo / confidence bucket 的 precision 与 coverage
-- `defer_reason_distribution`
+## 数据集
 
-## 正式 policy 冻结条件（P0-7）
+正式 Ground Truth 来自三个公开 GitHub 仓库的维护者真实标签：
 
-enforce 模式加载策略时，`load_calibrated_policy(for_enforce=True)` 严格校验：
+- `microsoft/vscode`
+- `nodejs/node`
+- `rust-lang/rust`
 
-- `source_dataset_hash` 非空（来自 dataset manifest 的真实 SHA-256，不是 `""`）；
-- 任一 enabled+allow_auto intent 必须有非空 `observed_precision`、`sample_count > 0`；
-- `prediction_artifact_hash` 非空（预测 artifact 的 SHA-256）；
-- 缺任一条件即 fail-closed，不允许 enforce 自动执行。
+清洗后共 2517 条唯一核心分类样本，按 repo + category 分层并在各 bucket 内做时间切分：
 
-## 当前状态（诚实声明）
+| split | records | bug | feature | question | documentation |
+|---|---:|---:|---:|---:|---:|
+| DEV | 2011 | 1529 | 269 | 132 | 81 |
+| TEST | 506 | 384 | 68 | 33 | 21 |
 
-- **工具链已完成**：两阶段架构、repo+category 分层时间切分、Jaccard near-dup 防泄漏、
-  仓库级 label resolver、ground-truth label 独立、阈值曲线、enforce 校验均已实现。
-- **真实数据已接入**（P1.10）：从用户 `issueflow` 数据卷只读构建了 v3
-  DEV 2011 条 + unseen TEST 506 条（见 `P1-DATA-REPORT.md`），
-  四类都进入 DEV 与 TEST；near-dup 2415 groups 全部不跨 split；TEST 冻结前未查看。
-- **v1 / v2 数据集已废弃**，移至 `datasets/deprecated/`。
-- **P1.7 group_id 已持久化**：JSONL 验证 `group_id IS NULL = 0`，DEV/TEST group 交集为空。
-- **P1.9 ground-truth label 独立**：`expected_label` 来自 `source_labels` 真实 label，
-  与 production resolver 完全分离；`ambiguous_concrete_label_count = 24`（已排除）。
-- **P1.8 unsupported category 已修复**：已知语义分类但 resolver 无映射 → DEFER(UNSUPPORTED_ACTION)，
-  不再误判 NO_ACTION。
-- **production-compatible LLM prediction 未执行**：成本估算约 $0.42（DEV 全量），
-  需用户确认模型后运行；正式 threshold selection 只读取 production prediction artifact。
-- **仓库级 label resolver（P1.3）已实现**：Agent 只输出 category，具体 label 由
-  `repo_labels.REPO_CATEGORY_LABELS` 决定；无验证映射的 (repo, category) 必须 DEFER。
-- **REQUEST_MISSING_INFORMATION 已隔离（P1.5）**：独立 confidence、强制 disabled，
-  不共享 category calibration。
-- `policy.json` 仍是初始全 disabled 的冻结 artifact；正式 freeze 需 production prediction + 人工复核。
-- 当前生产默认 `AUTOMATION_MODE=shadow`，即使有冻结 policy 也不会自动写回。
+近重复标题按 Jaccard 0.6 分组，group 不跨 DEV/TEST。`expected_label` 直接来自维护者
+真实 concrete label，与 production repo-label resolver 独立，避免自证循环。
+
+详细数据构建与防泄漏约束见 [DATASET.md](DATASET.md)。
+
+## 两阶段评测
+
+Prediction 与 Policy Evaluation 分离：
+
+```text
+Stage 1
+dataset
+→ app.agents.triage.predict_triage
+→ frozen prediction artifact
+
+Stage 2
+frozen predictions
+→ threshold scan / Policy Gate
+→ precision / coverage / CI
+```
+
+Stage 2 不重新调用模型；所有 threshold 在同一份 prediction artifact 上计算，因此不会把
+模型非确定性混入阈值比较。
+
+## 冻结产物
+
+- DEV predictions: `predictions/predictions_prod_dev_v3.jsonl`
+- TEST predictions: `predictions/predictions_prod_test_v3.jsonl`
+- frozen policy: `policy.label.frozen.json`
+- final report: `FINAL-LABEL-AUTOMATION-REPORT.md`
+
+正式模型为 `deepseek-v4-flash`，prompt 为 `triage-v2`。DEV 上冻结 threshold=0.92 后，
+TEST 只观察一次，不使用 TEST 重新选阈值。
+
+策略文件分为两类：
+
+- `policy.json`：安全基线，所有 intent disabled；未显式选择已校准策略时保持 fail-closed
+- `policy.label.frozen.json`：当前正式校准策略，仅授权 `add_category_label`
+
+`policy.label.frozen.json` 的 threshold 为 0.92，其余 intent 保持 disabled。
+
+## 最终 TEST 结果
+
+| metric | value |
+|---|---:|
+| TEST records | 506 |
+| auto actions | 198 |
+| correct auto actions | 186 |
+| precision | 93.94% |
+| Wilson 95% CI | [89.71%, 96.50%] |
+| coverage | 39.13% |
+| structured-output failures | 0 |
+| high-risk deferred | 4 |
+| unsupported-action deferred | 6 |
+
+这些数字是 **label auto-action** 指标，不代表完整 Agent accuracy，也不代表 duplicate
+classification precision。
+
+## 复现入口
+
+主要脚本：
+
+- `build_label_ground_truth.py`：从 historical issues 构建标签 Ground Truth
+- `run_production_prediction.py`：调用 production predictor 生成冻结 prediction
+- `select_policy_thresholds.py`：只读 DEV prediction 扫描阈值
+- `evaluate_frozen_policy.py`：在冻结 policy 上评测
+- `calibration_report.py`：生成 precision / coverage 与分桶报告
+
+完整指标、artifact hash、成本与分桶结果见
+[FINAL-LABEL-AUTOMATION-REPORT.md](FINAL-LABEL-AUTOMATION-REPORT.md)。

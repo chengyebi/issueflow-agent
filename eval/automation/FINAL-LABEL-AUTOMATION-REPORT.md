@@ -1,67 +1,99 @@
-# IssueFlow Label Automation — Final Report
+# IssueFlow Label Automation — Final Evaluation
 
-日期：2026-08-17
-这是本项目本阶段**最后一轮正式评测**。所有数字来自 unseen TEST 唯一一次 evaluation。
+Evaluation date: 2026-08-17
 
-## Protocol 摘要
+本报告记录自动标签能力的冻结 DEV/TEST 评测。所有 TEST 数字来自阈值冻结后的唯一一次
+held-out evaluation。
 
-- **评测范围**：GitHub Issue semantic category triage + repo-specific label resolver +
-  risk gate + selective label automation。
-  **不覆盖**：Retriever / duplicate / missing-info / technical reply / P3 per-action authorization。
-- **共享 predictor**：`app/agents/triage.predict_triage`，production workflow 与 eval 调用同一实现
-  （模型 / prompt / schema / structured output 完全一致），使用完整 body（无截断）。
-- **输入 hash**：`input_hash` = 对真实传给模型的 messages 的 canonical JSON SHA-256。
-- **Ground truth**：`expected_label` 来自 `source_labels` 中维护者实际使用的 concrete label
-  （与 production resolver 独立，P1.9）。
-- **checkpoint / resume**：每条完成立即 fsync；resume 用 (repo, issue_number, input_hash) 身份；
-  config fingerprint 不匹配时拒绝 append。
-- **成本保护**：保守 cache-miss 定价（input ¥1/M, output ¥2/M, effective 2026-08-17）。
+## Scope
 
-## 数据集
+评测链路：
 
-| split | 条数 | bug | feature | question | doc | SHA-256 |
-|---|---|---|---|---|---|---|
-| DEV | 2011 | 1529 | 269 | 132 | 81 | `94a0a81a49ae...` |
-| TEST | 506 | 384 | 68 | 33 | 21 | `9ad6e9899032...` |
-
-- 分层时间切分（repo+category 分层，DEV=较早、TEST=较新）
-- near-duplicate group（Jaccard 0.6）不跨 split：cross_split_group_count = 0
-- 所有 item：group_id 非空、expected_label ∈ source_labels
-
-## Prediction Artifacts
-
-| artifact | SHA-256 | 说明 |
-|---|---|---|
-| DEV frozen | `f140ca38d9805f736a159ab60e3ff458d68f9ffed144d569145227a9e0da1c20` | 2011 records, 0 structured failure |
-| TEST frozen | `fe15539fcaa3175cae5406999041b5266bd1136fa7a8f3b5b612c7b3ebde0877` | 506 records, 0 structured failure |
-
-## 冻结配置
-
-- **TEST 前锁死 commit SHA**：`0800229`（`评测：冻结自动标签开发集策略与预测结果`）
-- **frozen policy**：`eval/automation/policy.label.frozen.json`
-- **threshold**：`0.92`（raw confidence）
-- 模型：`deepseek-v4-flash`；prompt：`triage-v2`；runner：`prod-v2`
-- 仅 `add_category_label` enabled+allow_auto；其余 intent 全部 disabled
-
-## DEV 冻结 gate 检查（Step 10，TEST 前锁死）
-
-- A. auto_count=631 >= 200 ✅
-- B. Wilson 95% CI lower = 0.959 >= 0.95 ✅
-- C. auto_count>=30 的 bucket 均 point precision >= 0.90 ✅（vscode/feature 0.923、nodejs/doc 0.923、nodejs/bug 1.0、rust/bug 1.0）
-- D. structured failure 不 auto（DEV 0 failure）✅
-- E. predicted high-risk 不 auto（DEV 14 high-risk 全部 defer）✅
-
-选择规则：满足条件的 threshold 中取 coverage 最大 → **0.92**（coverage 0.3138，DEV）。
-
-## confidence 选择能力（P2.4）
-
-- correct conf mean 0.904 > incorrect conf mean 0.872
-- 阈值升高 precision 稳定上升：t=0.85→0.912、t=0.90→0.939、t=0.92→0.975、t=0.95→0.981
-- **结论：raw confidence 具有选择能力**，可作 selector。
-
-## 最终 TEST 指标（唯一一次，无调参）
-
+```text
+semantic triage
+→ repo-specific label resolver
+→ risk gate
+→ deterministic Policy Gate
+→ add_category_label
 ```
+
+不覆盖 Retrieval / duplicate decision / missing-information comment /
+technical reply，因此结果不能解释为完整端到端 Issue 自动化准确率。
+
+Production workflow 与 eval 共用 `app.agents.triage.predict_triage`，模型、prompt、schema
+与 structured output 路径保持一致。
+
+## Dataset
+
+| split | records | bug | feature | question | documentation |
+|---|---:|---:|---:|---:|---:|
+| DEV | 2011 | 1529 | 269 | 132 | 81 |
+| TEST | 506 | 384 | 68 | 33 | 21 |
+
+- repo + category 分层时间切分
+- near-duplicate group 不跨 split
+- `expected_label` 来自维护者真实 `source_labels`
+- Ground Truth 与 production resolver 独立
+
+详见 [DATASET.md](DATASET.md)。
+
+## Frozen prediction artifacts
+
+| artifact | SHA-256 | records |
+|---|---|---:|
+| DEV | `f140ca38d9805f736a159ab60e3ff458d68f9ffed144d569145227a9e0da1c20` | 2011 |
+| TEST | `fe15539fcaa3175cae5406999041b5266bd1136fa7a8f3b5b612c7b3ebde0877` | 506 |
+
+两份 production prediction 的 structured-output failure 均为 0。
+
+## Reproducibility
+
+Production-compatible prediction runner 保留以下可复现约束：
+
+- `input_hash` 是对真正传给模型的 messages 做 canonical JSON 后计算的 SHA-256，用于标识模型实际看到的输入；
+- 每条完成记录立即 append、flush 并 `fsync`，避免长任务中断时丢失已完成结果；
+- `--resume` 以 `(repo, issue_number, input_hash)` 识别已完成样本；
+- resume 时若 config fingerprint 不一致则拒绝继续写入原 artifact；fingerprint 包含 runner/model、prompt、schema、repo-label resolver、Git SHA 与定价日期等配置身份。
+
+这些机制只用于保证评测 artifact 的可追溯性与断点续跑一致性，不改变冻结 TEST 的统计结果。
+
+## Frozen policy
+
+- TEST 前冻结 commit: `0800229`
+- policy: `eval/automation/policy.label.frozen.json`
+- threshold: **0.92**
+- model: `deepseek-v4-flash`
+- prompt: `triage-v2`
+- runner: `prod-v2`
+- only `add_category_label` is enabled + allow_auto
+
+DEV gate 在 threshold=0.92 时：
+
+- auto_count = 631
+- precision = 0.9746
+- Wilson 95% CI lower = 0.959
+- coverage = 0.3138
+- predicted high-risk items are all deferred
+
+阈值选择规则是在满足 TEST 观察前已冻结的 precision / sample-size gate 的候选中最大化 coverage。
+
+## Confidence selection behavior
+
+DEV 上 raw confidence 对正确/错误 prediction 有区分能力：
+
+- correct mean confidence: 0.904
+- incorrect mean confidence: 0.872
+- precision: 0.912 @ 0.85
+- precision: 0.939 @ 0.90
+- precision: 0.975 @ 0.92
+- precision: 0.981 @ 0.95
+
+因此本轮实验允许用 raw confidence 作为自动标签 selector；该结论只适用于本次模型、
+prompt 与数据分布。
+
+## Held-out TEST result
+
+```text
 TEST_COUNT = 506
 LABEL_AUTO_ACTION_PRECISION = 0.9394
 LABEL_AUTO_ACTION_PRECISION_95CI = [0.8971, 0.9650]
@@ -75,10 +107,10 @@ UNSUPPORTED_ACTION_DEFER_COUNT = 6
 threshold = 0.92
 ```
 
-### per repo / per category
+### Per repository / category
 
-| bucket | n | prec | CI lower | CI upper | err |
-|---|---|---|---|---|---|
+| bucket | n | precision | CI lower | CI upper | errors |
+|---|---:|---:|---:|---:|---:|
 | microsoft/vscode | 27 | 0.7778 | 0.5924 | 0.8939 | 6 |
 | nodejs/node | 41 | 0.8537 | 0.7156 | 0.9312 | 6 |
 | rust-lang/rust | 130 | 1.0000 | 0.9713 | 1.0000 | 0 |
@@ -87,36 +119,22 @@ threshold = 0.92
 | documentation | 10 | 0.8000 | 0.4902 | 0.9433 | 2 |
 | question | 7 | 0.5714 | 0.2505 | 0.8418 | 3 |
 
-## 成本报告
+## Cost
 
-| 阶段 | calls | input tokens | output tokens | 成本(¥) | 耗时 |
-|---|---|---|---|---|---|
+| stage | calls | input tokens | output tokens | estimated cost | elapsed |
+|---|---:|---:|---:|---:|---:|
 | DEV | 2011 | 5,198,750 | 172,622 | ¥5.54 | 530s |
 | TEST | 506 | 1,454,154 | 44,541 | ¥1.54 | 132s |
-| **TOTAL** | 2517 | 6,652,904 | 217,163 | **¥7.09** | 662s |
+| **Total** | **2517** | **6,652,904** | **217,163** | **¥7.09** | **662s** |
 
-成本为保守估算（全部 input 按 cache-miss ¥1/M，output ¥2/M），token 为真实 usage_metadata。
+Token 数来自模型 usage metadata；成本按当次评测使用的保守 cache-miss 单价估算。
 
-## Limitations / 诚实边界
+## Limitations
 
-- 本 benchmark 只测 **triage + label resolver + risk gate + label automation**，
-  不是端到端 Issue 自动化。
-- **P3 BLOCKER BEFORE ENFORCE**：`AutomationDecision` 是 issue-level all-or-nothing，
-  未校准 action 会拖住同 Issue 已校准 action；开启 enforce 前必须实现 per-action authorization。
-- Retriever / duplicate / missing-info / technical reply 未在本 benchmark 覆盖。
-- AUTOMATION_MODE 保持 shadow；未切 enforce。
-
-## 简历可用表述（resume-ready）
-
-**HR 3 秒版**：在 6485 条真实 GitHub Issue 上构建时间切分 DEV/TEST（506 条 unseen），
-LLM 分类的自动标签动作 precision 达 93.9%（95% CI [89.7%, 96.5%]），
-低风险标签动作覆盖率 39.1%。
-
-**技术简历版**：IssueFlow 选择性自动化系统——确定性 Policy Gate + 仓库级 label resolver +
-checkpoint/resume 评测管线；在 unseen TEST（506）上 label auto-action precision 93.9%、
-coverage 39.1%，仅低风险动作自动执行。
-
-**面试口述版**：我们从"每条 Issue 都人工审核"重构为"确定性 Policy Gate 决定哪些动作可自动执行，
-其余进 Exception Queue"。因为 raw confidence 不是精度，我们用真实维护者 label 做 ground truth，
-先看 DEV 冻结 threshold 再看一次 unseen TEST，杜绝调参泄漏。最终低风险标签动作 precision 93.9%
-（CI 89.7%-96.5%），覆盖率 39.1%。剩余 Issue 因高置信度不足、缺标签映射或高风险而 DEFER。
+- 本 benchmark 仅校准 `add_category_label`
+- `request_missing_information`、`post_technical_reply`、`duplicate_action` 未由本 benchmark 授权
+- 当前 production router 采用 **Issue-level all-or-nothing**：同一 Issue 只要存在任一未获
+  冻结策略授权的 proposed action，整单 DEFER
+- Retrieval benchmark 只评估候选召回与排序，不等于 duplicate classification precision
+- production 默认 rollout 仍为 `shadow`
+- `enforce` 仅在受控 E2E 中验证过单个已校准 label action 的真实写回链路

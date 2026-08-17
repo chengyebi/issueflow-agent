@@ -6,8 +6,8 @@
 - 确定性启发式 runner 无法产生有意义的 calibration confidence：
   固定 raw_confidence = 1.0，并明确 runner_type="heuristic_smoke"，
   该 artifact 只能用于测试评测框架，不允许作为 production policy freeze 的依据。
-- 若要 production 阈值，必须运行与生产一致的 predictor（--runner production_llm），
-  并保存 model_name / prompt_version / input_hash；当前阶段不做付费调用。
+- 正式 calibration 不使用此 heuristic runner；production-compatible prediction
+  由 `run_production_prediction.py` 生成并保存 model_name / prompt_version / input_hash。
 
 输出 predictions.jsonl，每条至少：
   repo, issue_number, true_category, predicted_category,
@@ -113,7 +113,7 @@ def generate_predictions(dataset_path: Path, out_path: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="生成预测 artifact（Stage 1）")
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--out", type=Path, default=Path("eval/automation/predictions/predictions_dev_v2.jsonl"))
+    parser.add_argument("--out", type=Path, default=Path("eval/automation/predictions/predictions_heuristic_smoke.jsonl"))
     args = parser.parse_args()
 
     result = generate_predictions(args.dataset, args.out)

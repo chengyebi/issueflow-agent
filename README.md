@@ -254,7 +254,7 @@ flowchart LR
 
 Command Worker 只执行持有合法授权的命令，否则跳过。
 
-### 当前自动化边界（诚实声明）
+### 当前自动化边界
 
 - 正式默认 Compose 配置仍为 `AUTOMATION_MODE=shadow`，Worker 的 GitHub 写开关默认 `GITHUB_WRITE_ENABLED=false`；默认启动不会进行 policy 无人写回；
 - 自动标签 calibration 已完成，冻结 artifact 为 `eval/automation/policy.label.frozen.json`，当前只有 `add_category_label` 为 `enabled=true + allow_auto=true`，threshold **0.92**；
@@ -304,7 +304,7 @@ stateDiagram-v2
 
 批准流程：`review_tasks` 置为 `approved`、`github_commands` 置为 `approved`、写 `review_commands` Outbox，然后 Worker 依次执行命令。拒绝流程把仍处于 `proposed` 的命令置为 `rejected`，不进入执行队列。重复决定同一个任务返回 `409 Conflict`；并发决定由 `SELECT ... FOR UPDATE` 串行化。
 
-### 崩溃语义（诚实边界）
+### 崩溃语义
 
 - 已完成的 GitHub 写操作不自动重放：连接中断可能无法确认评论是否已创建，系统对这种情况的 HTTP 失败按 `retry_safe=false` 处理，避免静默发布重复评论；
 - 外部成功但本地状态更新前崩溃的 `executing` 命令保留 `executing`，需要人工对账，不自动重放；
@@ -596,8 +596,7 @@ curl --noproxy '*' \
 
 ### Human-authorized writeback
 
-既有人工授权演示见
-[GitHub Issue #5](https://github.com/chengyebi/issueflow-agent/issues/5)：
+人工授权写回通过 GitHub 仓库中专门创建的测试 Issue 完成真实 GitHub API 验证：
 
 ```text
 Issue
@@ -651,7 +650,7 @@ Policy Gate
 
 这条执行链能够真实闭环；它**不是**冻结 TEST 数据集的一部分，也不表示 `chengyebi/issueflow-agent` 已加入正式校准 repo resolver，更不表示默认部署已经开启无人写入。
 
-Retrieval 和 Label Automation 的可发布数字只来自各自冻结 DEV/TEST 协议，不用单次 E2E 冒充统计精度。
+Retrieval 和 Label Automation 的统计指标只来自各自冻结的 DEV/TEST 协议；单次 E2E 仅用于验证真实执行链路，不计入离线精度统计。
 
 ## 当前边界
 
@@ -666,7 +665,7 @@ Retrieval 和 Label Automation 的可发布数字只来自各自冻结 DEV/TEST 
 - 观测体系基于 PostgreSQL 持久化，未接入 OpenTelemetry / Prometheus / Grafana；
 - 当前是 LangGraph workflow 型 Agent，不是多智能体系统，也没有 MCP / Kubernetes / Kafka 等当前规模不需要的设施；
 - 默认 rollout 仍为 `shadow`，Worker 的 GitHub 写开关默认关闭；当前真实 enforce 只用于受控 E2E 验证，不宣称已经全面开放无人写入；
-- README 的自动化数字来自冻结离线协议，不虚构生产流量、QPS、uptime、SLA 或完整 Agent accuracy。
+- README 仅报告已由冻结离线协议或真实 E2E 直接支持的结果；当前未提供生产 QPS、uptime、SLA 或完整 Agent accuracy 指标。
 
 ## Roadmap
 
@@ -686,6 +685,8 @@ Retrieval 和 Label Automation 的可发布数字只来自各自冻结 DEV/TEST 
 - [长文本 Issue 检索策略](docs/rag-long-document-strategy.md)
 - [任务投递与恢复](docs/reliability.md)
 - [选择性自动化 V2](docs/selective-automation-v2.md)
+- [自动标签评测方法](eval/automation/README.md)
+- [自动标签数据集](eval/automation/DATASET.md)
 - [自动标签最终评测报告](eval/automation/FINAL-LABEL-AUTOMATION-REPORT.md)
 - 冻结自动标签策略：`eval/automation/policy.label.frozen.json`
 - [检索评测报告与数据集说明](eval/README.md)

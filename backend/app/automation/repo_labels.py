@@ -12,7 +12,7 @@
 from app.automation.models import ActionIntent
 
 # 真实仓库 category -> concrete GitHub label。
-# 来源：eval/automation/P1-DATA-REPORT.md 的只读标签统计。
+# 来源：historical_issues 中维护者实际使用的 concrete labels；当前 v3 数据集保留 source_labels 供独立核验。
 # 未列出的 (repo, category) 视为无验证映射 -> resolver 返回 None。
 REPO_CATEGORY_LABELS: dict[str, dict[str, str]] = {
     "microsoft/vscode": {

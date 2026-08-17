@@ -228,7 +228,7 @@ def confidence_analysis(predictions: list[dict]) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="P2 calibration report")
+    parser = argparse.ArgumentParser(description="Production prediction calibration report")
     parser.add_argument("--predictions", type=Path, required=True)
     parser.add_argument(
         "--thresholds", type=str, default="all",
