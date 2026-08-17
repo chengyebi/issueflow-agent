@@ -119,13 +119,26 @@ Outbox 事件新增 `github_commands`（按 `agent_run_id` 批量执行 policy �
 
 - 工具链已完成（build/run/select policy threshold）；
 - 从 historical_issues 的 maintainer labels 构建 category ground truth；
+- **ground truth label 独立（P1.9）**：expected_label 来自 source_labels 真实 concrete label，
+  与 production RepoLabelResolver 完全分离，避免自证循环；
+- **仓库级 label resolver（P1.3/P1.8）**：Agent 只输出 category，具体 label 由
+  `repo_labels.REPO_CATEGORY_LABELS` 决定；已知语义分类但无映射时 DEFER(UNSUPPORTED_ACTION)；
+- **分层时间切分（P1.1/P1.6）**：repo+category 分层，四类都进入 DEV 与 TEST，
+  Jaccard near-dup 不跨 split（P1.7 group_id 持久化验证）；
+- **共享 triage predictor（P2.2）**：production workflow 与 eval 调用同一
+  `predict_triage`（模型/prompt/schema/structured output 完全一致）；
 - DEV / unseen TEST 划分，TEST 在阈值冻结前不得查看；
-- 默认 runner 是确定性启发式，不调用付费 LLM（避免烧 API）；
-- **当前 calibration 尚未执行**：无真实样本数、无已发布 coverage/precision。
+- **production prediction（P2.3）**：对 DEV v3 全量运行一次真实 LLM prediction，
+  记录 structured output failure（不删除样本），生成 frozen artifact；
+- **confidence 选择能力（P2.4）**：不默认 raw confidence 有用，分析 correct/incorrect 分布
+  与阈值曲线；若 confidence 无排序能力则如实报告"无法可靠选择 threshold"。
 
 ## 当前限制
 
-- automation calibration 未完成 → 所有 intent 仍 `enabled=false`，默认 shadow；
+- automation calibration 状态见 `eval/automation/P1-DATA-REPORT.md`；初始 policy 全 disabled；
 - duplicate 自动执行关闭（Retriever 离线覆盖率不足）；
 - Review API 记录 approve/reject，暂不记录逐 action 修改；
+- **P3 BLOCKER BEFORE ENFORCE**：当前 AutomationDecision 是 issue-level all-or-nothing，
+  一个低可信 action（如未校准的 request_missing_information）会拖住同 Issue 已校准的
+  safe action；开启 enforce 前必须实现 per-action selective authorization；
 - 不做大规模付费 LLM benchmark。
